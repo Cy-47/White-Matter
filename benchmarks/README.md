@@ -1,0 +1,91 @@
+# Benchmarks
+
+Run from the checkout after installing `pip install -e '.[benchmarks]'`. GPU workloads
+require compatible FlashAttention and TileLang installations. CCE recipes additionally
+require cut-cross-entropy. These utilities are checkout tools, not part of the pip API.
+
+## Full models
+
+Use recipe YAML files for seeded random weights, or local HF exports for generation.
+Recipe initialization does not require downloading weights or data. It measures execution,
+not model quality. Both generation inputs and training packed documents are synthetic.
+
+```bash
+python -m benchmarks.training --recipes recipes/paper/white_matter_1p3b.yaml recipes/paper/vanilla_1p3b.yaml \
+  --sequence-lengths 2048 --batch-sizes 1 --memory-budget-gib 40
+python -m benchmarks.generation --recipes recipes/paper/white_matter_1p3b.yaml recipes/paper/vanilla_1p3b.yaml \
+  --prompt-lengths 2048 --batch-sizes 24 --phase prefill --prefill-batch-size 0 --memory-budget-gib 40
+python -m benchmarks.generation --recipes recipes/paper/white_matter_1p3b.yaml recipes/paper/vanilla_1p3b.yaml \
+  --prompt-lengths 2048 --batch-sizes 24 --phase decode --tokens 129 --memory-budget-gib 40
+```
+
+Generation is compiled and uses FlashAttention decoding, with CUDA graph replay enabled
+by default. `--tokens` includes the first token selected during prefill: 129 means 128
+timed decode steps. Decode prefix preparation is excluded. Each cache row owns storage.
+Use `--no-compiled` to benchmark eager model execution when whole-model compilation
+is impractical; the run record retains this setting.
+`--prefill-batch-size 0` processes the complete resident batch; the default is one.
+The `end-to-end` phase measures prefill followed by token generation.
+
+Training compiles by default; `--no-compiled` explicitly selects eager execution.
+Compilation includes Muon's Newton–Schulz tensor computation, preserving its BF16
+casts. Momentum/parameter updates use foreach kernels and AdamW uses its fused kernel;
+learning-rate scheduling and optimizer state management stay outside compilation.
+It calls the same forward setup, loss, clipped-gradient calculation, and optimizers as
+`training.engine`. Recipe settings control CCE (`cce_exact`), accumulation, pass counts,
+residual precision, AR checkpointing/graphs, and distributed Muon. Parameters and gradients
+remain FP32. Updates use the recipe's constant peak learning rate, rather than its training
+schedule. Token throughput counts batch × sequence length × accumulation × world size.
+`--batch-sizes` means the per-device microbatch. Synthetic document patterns vary across
+microbatches/ranks; a small fixed input pool is reused across updates to bound input memory.
+
+For distributed training, run the CLI once inside a multi-GPU allocation and pass
+`--world-size N`. Each case launches fresh local workers and uses the production gradient
+reducer. Set `optimizer.distributed_muon: true` in the recipe to shard Muon state; a
+single-GPU request with this setting fails rather than silently changing the optimizer.
+The result retains every rank's samples; throughput uses the slowest rank per update and
+memory admission uses the largest per-device footprint. Multi-node launches are not supported.
+
+## Measurement and results
+
+Training defaults to batch 1; generation sweeps batches 1, 2, 4, 8, 16, 32, and 64.
+Shared defaults: sequence length 2048, seed 1337, three warmups, five timed repetitions, one worker
+per shape, capacity-search ceiling 1024. Increase `--worker-repeats` for independent trials
+with reversed model order. Setup/compilation and warmed measurement are separate; the memory
+budget applies to warmed execution, with 0.5 GiB headroom. Setup may require more physical
+memory than that budget. Training records setup allocated/reserved peaks separately.
+Budget accounting uses the maximum of sampled total device usage and peak reserved plus
+stable external overhead. Use otherwise idle GPUs. Allocator peaks are exact; sampled device
+usage can miss short external allocations. No CPU offloading or microbatch substitution is
+performed by capacity search.
+
+One runner handles matched batches and expansion/bisection searches for both workloads.
+It checks the adjacent rejected batch unless the search ceiling is reached, flags observed
+nonmonotonic admission, and measures both models at the smaller capacity as an additional
+matched-batch comparison. Each prefill/decode invocation searches independently.
+
+```text
+outputs/                         # Default, relative to working directory; gitignored
+  sources/<sha256>/               # Shared source archives, including training code
+  <timestamp>-training/          # Or generation, cyclic-attention, or *-profile
+    run.json                     # Inputs, source identity, execution settings
+    recipes/                     # Exact recipe copies, when used
+    cases/*.json                 # Results and raw timings
+    cases/*.log                  # Worker logs
+    cases/ranks/*.json           # Distributed worker outcomes
+    profiles/*.json              # Chrome traces; separate instrumented runs
+    summary.json
+    RESULTS.md
+```
+
+Override the root with `--output`. A failed worker preserves its log and stops the sweep;
+OOM is a recorded capacity result. Source/input changes invalidate results even after OOM.
+
+```bash
+python -m benchmarks.report outputs/<run-id> --csv outputs/table.csv
+python -m benchmarks.training --recipes recipes/paper/white_matter_1p3b.yaml \
+  --batch-sizes 1 --sequence-lengths 2048 --profile
+python -m benchmarks.cyclic_attention --backend tilelang --device cuda --documents
+```
+
+Profiles do not contribute throughput results. Training writes one Chrome trace per rank.

@@ -1,0 +1,11 @@
+WhiteMatter is licensed under the MIT License; see LICENSE.
+
+Bundled third-party code
+-----------------------
+src/white_matter/models/_qwen3.py, src/white_matter/modules/mlp.py,
+src/white_matter/modules/rotary.py, and src/white_matter/layers/backends.py are
+derived from Hugging Face Transformers.
+Copyright 2025 The Qwen team, Alibaba Group and the HuggingFace Inc. team.
+All rights reserved.
+These files retain their Apache License, Version 2.0 notice. The license text
+and inherited attribution are included in LICENSES/Apache-2.0.txt.

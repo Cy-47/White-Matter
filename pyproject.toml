@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "white-matter"
+version = "0.1.0"
+description = "WhiteMatter language models with a shared cross-layer KV pool"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE", "LICENSES/*.txt", "NOTICE"]
+authors = [{name = "Wenbo Zhang"}, {name = "Xiang Ren"}]
+dependencies = ["torch>=2.12,<2.13"]
+
+[project.optional-dependencies]
+models = ["transformers>=5.10.2,<5.11", "safetensors>=0.5,<1", "huggingface-hub>=0.34,<2"]
+training = ["white-matter[models]", "numpy>=1.26,<3", "pyyaml>=6,<7"]
+# TVM FFI 0.1.13.post3 aborts when importing this TileLang build.
+tilelang = ["tilelang==0.1.11", "apache-tvm-ffi==0.1.11"]
+flash-attn = ["flash-attn==2.8.3"]
+gpu = ["white-matter[tilelang,flash-attn]"]
+data = ["datasets>=4,<5"]
+benchmarks = ["white-matter[training,gpu]", "nvidia-ml-py>=12,<14"]
+dev = ["pytest>=8,<10", "ruff>=0.12,<1", "build>=1,<2", "mypy>=1.20,<1.21"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["white_matter*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+extend-select = ["B023"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+markers = [
+  "gpu: requires CUDA",
+]
+
+[tool.setuptools.package-data]
+white_matter = ["py.typed"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/white_matter/ops", "src/white_matter/modules", "src/white_matter/layers", "src/white_matter/blocks", "tests/typing"]
+exclude = ["/ops/cyclic_attention/_tilelang/"]
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+# TileLang's generated DSL and optional FlashAttention have no usable stubs.
+# Their public tensor wrappers are checked; backend correctness is GPU-tested.
+[[tool.mypy.overrides]]
+module = ["white_matter.ops.cyclic_attention._tilelang.*", "flash_attn.*"]
+follow_imports = "skip"
+ignore_missing_imports = true

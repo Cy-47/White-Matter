@@ -1,0 +1,60 @@
+# Python, environments, and build products
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+.ipynb_checkpoints/
+build/
+dist/
+
+# Local runs and datasets
+/data/
+/outputs/
+/artifacts/
+/checkpoints/
+/logs/
+/cache/
+slurm_logs/
+slurm-*.out
+slurm-*.err
+*.log
+wandb/
+
+# Compiler caches
+.torch/
+.inductor_cache/
+.tilelang_cache/
+
+# Generated weights and arrays
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+pytorch_model*.bin
+optimizer*.bin
+*.npy
+*.npz
+*.arrow
+*.parquet
+*.sqlite
+*.sqlite3
+*.db
+
+# Local editor and OS files
+.idea/
+.vscode/
+.DS_Store
+
+# Local credentials and machine-specific settings
+.env
+.env.*
+!.env.example
+.envrc
+.netrc
+*.pem
+*.key
+*.p12
+.direnv/
