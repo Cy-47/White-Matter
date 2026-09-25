@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,23 @@ PAPER_TASKS = [
     "openbookqa",
 ]
 MAX_EVAL_CONTEXT_TOKENS = 1_024
+
+
+def harness_provenance() -> dict[str, str | None]:
+    """Record the installed package and exact source revision when available."""
+    import lm_eval
+
+    distribution = importlib.metadata.distribution("lm_eval")
+    root = Path(lm_eval.__file__).resolve().parent.parent
+    revision = None
+    if (root / ".git").exists():
+        revision = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True,
+        ).strip()
+    else:
+        direct_url = json.loads(distribution.read_text("direct_url.json") or "{}")
+        revision = direct_url.get("vcs_info", {}).get("commit_id")
+    return {"version": distribution.version, "git_commit": revision}
 
 
 def configure_eval_compiler() -> None:
@@ -199,8 +218,10 @@ class WhiteMatterHarnessLM(TemplateLM):
     @torch.inference_mode()
     def generate_until(self, requests, disable_tqdm: bool = False) -> list[str]:
         del disable_tqdm
-        if self.is_cyclic and getattr(self.model.config, "prefill_mode", None) is None:
-            raise ValueError("choose prefill_mode='cyclic' or 'autoregressive' explicitly for generation")
+        if self.model.config.execution_mode in {"cyclic", "jacobi"} and getattr(
+            self.model.config, "prefill_mode", None
+        ) is None:
+            raise ValueError("choose prefill_mode='cyclic', 'jacobi', or 'autoregressive' for generation")
         ordered = Collator(
             [request.args for request in requests],
             sort_fn=lambda item: -len(self.tok_encode(item[0])),
@@ -226,9 +247,17 @@ class WhiteMatterHarnessLM(TemplateLM):
             pad = self.eot_token_id if pad is None else pad
             ids = torch.tensor([[pad] * (width - len(row)) + row for row in tokens], device=self._device)
             mask = torch.tensor([[0] * (width - len(row)) + [1] * len(row) for row in tokens], device=self._device)
-            # Native HF stopping handles each row independently; dynamic KV supports left padding.
-            options.update(use_cache=True, cache_implementation="dynamic", max_new_tokens=limit,
-                           pad_token_id=pad, eos_token_id=self.eot_token_id, return_dict_in_generate=False)
+            # HF owns generation controls for every family. FusedKV recomputes
+            # the prefix; the other families retain a dynamic cache.
+            use_cache = self.model.config.model_type != "fusedkv"
+            options.update(
+                use_cache=use_cache,
+                cache_implementation="dynamic" if use_cache else None,
+                max_new_tokens=limit,
+                pad_token_id=pad,
+                eos_token_id=self.eot_token_id,
+                return_dict_in_generate=False,
+            )
             if stops:
                 options["stopping_criteria"] = [*options.get("stopping_criteria", []),
                                                 _ContinuationStopStrings(self.tokenizer, stops, width)]
@@ -253,10 +282,17 @@ def main() -> None:
     parser.add_argument("--limit", type=int, help="Examples per task, for smoke tests only.")
     parser.add_argument("--max-length", type=int, default=MAX_EVAL_CONTEXT_TOKENS)
     parser.add_argument("--no-compile", action="store_true", help="Skip optional feedback compilation on CUDA.")
-    parser.add_argument("--prefill-mode", choices=["cyclic", "autoregressive"])
+    parser.add_argument("--prefill-mode", choices=["cyclic", "jacobi", "autoregressive"])
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-fewshot", type=int, default=0)
+    parser.add_argument("--log-samples", action="store_true", help="Save every prompt, generation, and score.")
+    parser.add_argument("--sample-range", type=int, nargs=2, metavar=("START", "STOP"),
+                        help="Evaluate a half-open document-index range for one task (for sharding).")
     args = parser.parse_args()
+    if args.sample_range is not None:
+        start, stop = args.sample_range
+        if len(args.tasks) != 1 or args.limit is not None or not 0 <= start < stop:
+            parser.error("--sample-range requires one task, no --limit, and 0 <= START < STOP")
 
     from lm_eval import simple_evaluate
 
@@ -285,14 +321,20 @@ def main() -> None:
         num_fewshot=args.num_fewshot,
         limit=args.limit,
         task_manager=task_manager,
-        log_samples=False,
+        log_samples=args.log_samples,
         cache_requests=False,
+        samples={args.tasks[0]: list(range(*args.sample_range))} if args.sample_range is not None else None,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({
         "model": args.model, "tasks": args.tasks, "limit": args.limit,
         "num_fewshot": args.num_fewshot,
         "max_length": harness_model.max_length, "results": result["results"],
+        "harness": harness_provenance(),
+        "task_versions": result.get("versions", {}),
+        "task_configs": result.get("configs", {}),
+        **({"sample_range": args.sample_range} if args.sample_range is not None else {}),
+        **({"samples": result["samples"]} if args.log_samples else {}),
     }, indent=2, default=str))
 
 

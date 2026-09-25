@@ -17,7 +17,8 @@ dist/
 /checkpoints/
 /logs/
 /cache/
-slurm_logs/
+/slurm_logs/*
+!/slurm_logs/.gitkeep
 slurm-*.out
 slurm-*.err
 *.log

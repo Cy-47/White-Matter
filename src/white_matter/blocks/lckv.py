@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Literal, overload
 
 import torch
 from torch import nn
 
 from white_matter.modules.documents import document_position_ids
 from white_matter.modules.kv_pool import KVPool
+from white_matter.modules.precision import model_autocast_context
 from white_matter.modules.rotary import PositionEmbedding
 
-from ._execution import jacobi
+from ._execution import jacobi, resolve_passes
 from .decoder_layer import FeedbackDecoderLayer, run_feedback_layers
 
 
@@ -62,4 +64,58 @@ class LCKVBlock(nn.Module):
         )
         return torch.stack(states, dim=1), hidden
 
-    forward = jacobi.forward_jacobi
+    @overload
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        num_passes: int | None = None,
+        num_gradient_passes: int | None = None,
+        document_ids: torch.Tensor | None = None,
+        output_final_state: Literal[False] = False,
+    ) -> torch.Tensor: ...
+
+    @overload
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        num_passes: int | None = None,
+        num_gradient_passes: int | None = None,
+        document_ids: torch.Tensor | None = None,
+        output_final_state: Literal[True],
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]: ...
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        num_passes: int | None = None,
+        num_gradient_passes: int | None = None,
+        document_ids: torch.Tensor | None = None,
+        output_final_state: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        # Training retains the full-stack reference, including its gradients.
+        if self.training or torch.is_grad_enabled() or num_gradient_passes not in (None, 0):
+            return jacobi.forward_jacobi(
+                self, x, num_passes=num_passes, num_gradient_passes=num_gradient_passes,
+                document_ids=document_ids, output_final_state=output_final_state,
+            )
+        passes, _ = resolve_passes(self.num_passes, num_passes, num_gradient_passes)
+        q_pos_emb, k_pos_emb = self._prepare_rope(x, document_ids)
+        source = x
+        with torch.no_grad(), model_autocast_context(x.device):
+            for _ in range(passes):
+                # Only the input to the last feedback layer feeds the fixed source.
+                expanded = source.unsqueeze(2).expand(-1, -1, len(self.layers), -1)
+                keys, values = self.kv_pool.project_sequence(expanded, k_pos_emb)
+                del expanded
+                hidden = x
+                for layer in self.layers:
+                    source = hidden
+                    hidden = layer(hidden, keys[:, 0], values[:, 0], q_pos_emb, document_ids=document_ids)
+                del keys, values
+            if output_final_state:
+                expanded = source.unsqueeze(2).expand(-1, -1, len(self.layers), -1)
+                return hidden, self.kv_pool.project_sequence(expanded, k_pos_emb)
+        return hidden

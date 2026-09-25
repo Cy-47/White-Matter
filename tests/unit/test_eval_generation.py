@@ -1,4 +1,4 @@
-"""Exercise the harness adapter through HF's real cached generation loop."""
+"""Exercise the harness adapter through HF's cached and uncached generation."""
 from types import SimpleNamespace
 
 import pytest
@@ -21,27 +21,33 @@ class ForcedTokens(LogitsProcessor):
         return scores
 
 
-def adapter(prefill="autoregressive", device="cpu"):
+def adapter(prefill="autoregressive", device="cpu", family="white_matter"):
     vocab = {char: index for index, char in enumerate(["<pad>", "<eos>"] + list("abcdefghijklmnopqrstuvwxyzXYZ "))}
     backend = Tokenizer(models.BPE(vocab, [], unk_token="<pad>"))
     backend.decoder = decoders.Fuse()
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, pad_token="<pad>", eos_token="<eos>")
+    options = {}
+    if family == "white_matter":
+        options = dict(num_kv_channels=1, cyclic_groups=2, num_passes=2,
+                       execution_mode="cyclic", prefill_mode=prefill)
     config = AutoConfig.for_model(
-        "white_matter", vocab_size=len(vocab), hidden_size=64 if device == "cuda" else 16,
+        family, vocab_size=len(vocab), hidden_size=64 if device == "cuda" else 16,
         intermediate_size=128 if device == "cuda" else 24,
         num_hidden_layers=2, num_attention_heads=1, num_key_value_heads=1, head_dim=64 if device == "cuda" else 16,
-        num_kv_channels=1, cyclic_groups=2, num_passes=2, max_position_embeddings=256 if device == "cuda" else 32,
-        execution_mode="cyclic", prefill_mode=prefill, pad_token_id=0, eos_token_id=1,
-        document_separator_token_id=None,
+        max_position_embeddings=256 if device == "cuda" else 32,
+        pad_token_id=0, eos_token_id=1, document_separator_token_id=None, **options,
     )
     config._attn_implementation = "flash_attention_2" if device == "cuda" else "sdpa"
     model = AutoModelForCausalLM.from_config(config).to(device).eval()
     return WhiteMatterHarnessLM(model=model, tokenizer=tokenizer, batch_size=2)
 
 
-@pytest.mark.parametrize("prefill", ["autoregressive", "cyclic"])
-def test_generation_uses_cache_and_stops_without_mutating_requests(prefill, monkeypatch):
-    lm = adapter(prefill)
+@pytest.mark.parametrize("family,prefill", [
+    ("white_matter", "autoregressive"), ("white_matter", "cyclic"),
+    ("white_matter", "jacobi"), ("fusedkv", None),
+])
+def test_generation_stops_without_mutating_requests(family, prefill, monkeypatch):
+    lm = adapter(prefill, family=family)
     generated = lm.tok_encode("XYZ")
     options = {"until": ["XY"], "max_gen_toks": 5,
                "logits_processor": [ForcedTokens(3, generated)]}
@@ -57,14 +63,20 @@ def test_generation_uses_cache_and_stops_without_mutating_requests(prefill, monk
     import functools
     monkeypatch.setattr(lm.model, "forward", functools.wraps(forward)(record))
     assert lm.generate_until(requests) == ["", ""]
-    assert [length for _, length in calls] == [3, 1]
-    assert all(cache is calls[0][0] for cache, _ in calls)
+    assert [length for _, length in calls] == ([3, 4] if family == "fusedkv" else [3, 1])
+    if family == "fusedkv":
+        assert all(cache is None for cache, _ in calls)
+    else:
+        assert calls[0][0] is not None
+        assert all(cache is calls[0][0] for cache, _ in calls)
+        assert lm.model.config.prefill_mode == prefill
     assert options["until"] == ["XY"] and "use_cache" not in options
-    assert lm.model.config.prefill_mode == prefill
 
 
-def test_generation_requires_explicit_cyclic_policy():
+@pytest.mark.parametrize("execution_mode", ["cyclic", "jacobi"])
+def test_generation_requires_explicit_iterative_policy(execution_mode):
     lm = adapter(None)
+    lm.model.config.execution_mode = execution_mode
     with pytest.raises(ValueError, match="prefill_mode"):
         lm.generate_until([SimpleNamespace(args=("a", {}))])
 
@@ -93,8 +105,9 @@ def test_generation_truncation_empty_context_and_request_order():
     assert lm.generate_until(requests) == ["ZZ", "ZZ"]
 
 
-def test_generation_restores_order_across_options_and_honors_eos():
-    lm = adapter()
+@pytest.mark.parametrize("family", ["white_matter", "fusedkv"])
+def test_generation_restores_order_across_options_and_honors_eos(family):
+    lm = adapter(family=family)
     requests = [
         SimpleNamespace(args=("a", {"max_gen_toks": 3, "logits_processor": [ForcedTokens(1, [1])]})),
         SimpleNamespace(args=("abc", {"max_gen_toks": 2,
@@ -110,8 +123,9 @@ def test_generation_rejects_unsupported_options(options):
         lm.generate_until([SimpleNamespace(args=("a", options))])
 
 
-def test_stop_strings_do_not_match_across_prompt_boundary():
-    lm = adapter()
+@pytest.mark.parametrize("family", ["white_matter", "fusedkv"])
+def test_stop_strings_do_not_match_across_prompt_boundary(family):
+    lm = adapter(family=family)
     request = SimpleNamespace(args=("X", {"max_gen_toks": 2, "until": ["XY"],
                                          "logits_processor": [ForcedTokens(1, lm.tok_encode("YZ"))]}))
     assert lm.generate_until([request]) == ["YZ"]
@@ -119,7 +133,7 @@ def test_stop_strings_do_not_match_across_prompt_boundary():
 
 @pytest.mark.gpu
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("prefill", ["autoregressive", "cyclic"])
+@pytest.mark.parametrize("prefill", ["autoregressive", "cyclic", "jacobi"])
 @pytest.mark.parametrize("documents", [False, True])
 @torch.inference_mode()
 def test_gpu_generation_dynamic_padding_matches_sdpa(prefill, documents, monkeypatch):
@@ -159,6 +173,8 @@ def test_gpu_generation_dynamic_padding_matches_sdpa(prefill, documents, monkeyp
         monkeypatch.setattr(lm.model.config, "_attn_implementation", "sdpa")
         for layer in lm.model.model.decoder.block.layers:
             monkeypatch.setattr(layer.self_attn, "attention_implementation", "sdpa")
+            if prefill == "jacobi":
+                monkeypatch.setattr(layer.self_attn, "_force_jacobi_reference", True)
         assert lm.generate_until(requests) == ["ZZ", "ZZ"]
     finally:
         handle.remove()

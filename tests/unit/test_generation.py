@@ -514,9 +514,10 @@ def test_dynamic_cache_adds_document_metadata_after_plain_prefix():
     close(result.logits, expected, 'cpu')
 
 
+@pytest.mark.parametrize('prefill', ['cyclic', 'jacobi'])
 @torch.no_grad()
-def test_cyclic_prefill_rejects_explicit_positions_without_mutating_cache():
-    model = inference_model('cpu', 'white_matter')
+def test_iterative_prefill_rejects_explicit_positions_without_mutating_cache(prefill):
+    model = inference_model('cpu', 'white_matter', prefill=prefill)
     cache = model.allocate_inference_cache(8)
     with pytest.raises(ValueError, match='explicit position_ids'):
         model(torch.tensor([[2, 3]]), use_cache=True, past_key_values=cache, position_ids=torch.tensor([[7, 8]]))

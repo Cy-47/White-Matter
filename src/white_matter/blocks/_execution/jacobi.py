@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal, overload
 
 import torch
+from torch.utils.checkpoint import checkpoint
 
 from white_matter.modules.precision import model_autocast_context
 
@@ -39,6 +40,18 @@ def forward_jacobi(
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]: ...
 
 
+@overload
+def forward_jacobi(
+    self: WhiteMatterBlock | LCKVBlock,
+    x: torch.Tensor,
+    *,
+    num_passes: int | None = None,
+    num_gradient_passes: int | None = None,
+    document_ids: torch.Tensor | None = None,
+    output_final_state: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]: ...
+
+
 def forward_jacobi(
     self: WhiteMatterBlock | LCKVBlock,
     x: torch.Tensor,
@@ -57,10 +70,20 @@ def forward_jacobi(
             states, hidden = self.jacobi_pass(x, states, q_pos_emb, k_pos_emb, document_ids)
     # Detached passes produce fresh state tensors; differentiated passes still read live x.
     for _ in range(num_gradient_passes):
-        states, hidden = self.jacobi_pass(x, states, q_pos_emb, k_pos_emb, document_ids)
+        if getattr(self, "checkpoint_jacobi_passes", False) and torch.is_grad_enabled():
+            # Every data-dependent input is explicit for backward recomputation.
+            states, hidden = checkpoint(
+                self.jacobi_pass, x, states, q_pos_emb, k_pos_emb, document_ids,
+                use_reentrant=False, preserve_rng_state=False,
+            )
+        else:
+            states, hidden = self.jacobi_pass(x, states, q_pos_emb, k_pos_emb, document_ids)
     if output_final_state:
         # The last sweep's layer inputs define the frozen prompt memory used
         # by subsequent autoregressive tokens.
-        keys, values = self.kv_pool.project_sequence(states.transpose(1, 2).contiguous(), k_pos_emb)
+        keys, values = self.kv_pool.project_sequence(
+            states.transpose(1, 2).contiguous(), k_pos_emb,
+            dummy_token=getattr(self, "dummy_token", None),
+        )
         return hidden, (keys, values)
     return hidden

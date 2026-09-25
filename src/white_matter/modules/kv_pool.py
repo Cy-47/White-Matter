@@ -1,14 +1,14 @@
 """Cross-layer KV construction."""
 
 from collections.abc import Callable
-from typing import Protocol
+from typing import Protocol, cast
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from .rotary import rotate_half
-from .routing import Router, _RoutedMixer
+from .routing import FixedSourceMixer, Router, _RoutedMixer
 from .checkpointing import checkpoint_pointwise
 
 
@@ -51,6 +51,7 @@ class KVPool(nn.Module):
         initializer_range: float = 0.02,
         router_prior: str = "cyclic:0.25",
         router_layer_stride: int = 1,
+        router_dynamic: bool = True,
         mixer: KVMixer | None = None,
     ) -> None:
         super().__init__()
@@ -75,6 +76,7 @@ class KVPool(nn.Module):
                         num_kv_channels,
                         router_prior=router_prior,
                         layer_stride=router_layer_stride,
+                        dynamic=router_dynamic,
                     )
                     for _ in range(2)
                 )
@@ -97,8 +99,16 @@ class KVPool(nn.Module):
 
     def _project(self, stacked: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # Mix (B,T,L,D) source-layer inputs into (B,T,k,D) channels before projection.
+        fixed_source = (not self.training and not torch.is_grad_enabled()
+                        and type(self.mixer) is FixedSourceMixer)
+        if fixed_source:
+            # LCKV's other source coefficients are exactly zero. Slice before
+            # normalization and K/V premixing to avoid L full-size temporaries.
+            stacked = stacked[:, :, -1:, :]
         normed = F.rms_norm(stacked, (self.hidden_size,), None, self.rms_norm_eps)
-        shape = (1, 1, self.num_layers, self.hidden_size)
+        shape = (1, 1, stacked.shape[2], self.hidden_size)
+        k_weight = self.pre_mix_k_weight[-1:] if fixed_source else self.pre_mix_k_weight
+        v_weight = self.pre_mix_v_weight[-1:] if fixed_source else self.pre_mix_v_weight
         fused = (not self.training and not torch.is_grad_enabled() and stacked.is_cuda
                  and torch.is_autocast_enabled("cuda") and torch.get_autocast_dtype("cuda") == torch.bfloat16
                  and type(self.mixer) is _RoutedMixer)
@@ -106,14 +116,19 @@ class KVPool(nn.Module):
             # Cast these small weights before fusion: Inductor otherwise removes
             # their BF16 round-trip when multiplying FP32 normalized activations.
             stacked_K, stacked_V = _premix_inference(
-                normed, self.pre_mix_k_weight.view(*shape).to(stacked.dtype),
-                self.pre_mix_v_weight.view(*shape).to(stacked.dtype),
+                normed, k_weight.view(*shape).to(stacked.dtype),
+                v_weight.view(*shape).to(stacked.dtype),
             )
         else:
-            stacked_K = normed * self.pre_mix_k_weight.view(*shape).to(stacked.dtype)
-            stacked_V = normed * self.pre_mix_v_weight.view(*shape).to(stacked.dtype)
+            stacked_K = normed * k_weight.view(*shape).to(stacked.dtype)
+            stacked_V = normed * v_weight.view(*shape).to(stacked.dtype)
         del normed
-        h_K, h_V = self.mixer(stacked_K, stacked_V)
+        if fixed_source:
+            logits = cast(FixedSourceMixer, self.mixer).logits[:, -1:]
+            h_K = torch.einsum("btld,kl->btkd", stacked_K, logits.to(stacked_K.dtype))
+            h_V = torch.einsum("btld,kl->btkd", stacked_V, logits.to(stacked_V.dtype))
+        else:
+            h_K, h_V = self.mixer(stacked_K, stacked_V)
         del stacked_K, stacked_V
         h_K = F.rms_norm(h_K, (self.hidden_size,), None, self.mix_norm_eps)
         h_V = F.rms_norm(h_V, (self.hidden_size,), None, self.mix_norm_eps)

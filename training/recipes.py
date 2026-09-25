@@ -125,7 +125,9 @@ class TrainingRecipe:
         if self.data.eos_token_id != self.model.eos_token_id:
             raise ValueError("data and model eos_token_id values must match")
 
-        iterative = self.model.model_type in {"white_matter", "lckv"}
+        # WhiteMatter's exact-AR control retains its nominal pass metadata,
+        # even though the trainer executes its single exact token sweep.
+        iterative = hasattr(self.model, "num_passes")
         if iterative:
             if type(self.no_gradient_passes) is not int or self.no_gradient_passes < 0:
                 raise ValueError("iterative models require non-negative no_gradient_passes")

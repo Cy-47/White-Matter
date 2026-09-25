@@ -4,6 +4,11 @@ Supply cluster-specific account, partition, module, and filesystem settings at
 submission time or in a site-local wrapper. Training recipes remain portable
 across clusters.
 
+Submit from the repository root. Logs go to `slurm_logs/`, whose empty
+placeholder keeps the directory available in fresh checkouts. Slurm opens logs
+before the script runs, so recreate this directory before submission if you
+delete it. Generated logs are ignored by Git.
+
 The paper trained on one node with eight GPUs:
 
 ```bash

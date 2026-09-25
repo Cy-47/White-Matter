@@ -27,6 +27,10 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
     """
 
     _no_split_modules = ["FeedbackDecoderLayer"]
+    # Research models may replace the pool without duplicating the decoder,
+    # attention schedule, or cache implementation.
+    pool_class = KVPool
+    block_class = WhiteMatterBlock
 
     def __init__(self, config: WhiteMatterConfig) -> None:
         super().__init__(config)
@@ -35,7 +39,7 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
         # The block owns the feedback layers, KV pool, dummy token, and RoPE.
         depth = config.num_hidden_layers - config.num_pre_layers - config.num_post_layers
         layers = make_feedback_layers(config, depth)
-        pool = KVPool(
+        pool = self.pool_class(
             config.hidden_size,
             config.num_key_value_heads,
             config.head_dim,
@@ -45,12 +49,14 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
             initializer_range=config.initializer_range,
             router_prior=config.router_prior,
             router_layer_stride=config.router_layer_stride,
+            router_dynamic=config.router_dynamic,
         )
-        self.block = WhiteMatterBlock(
+        self.block = self.block_class(
             layers,
             pool,
             RotaryEmbedding(config.head_dim, config.rope_theta),
             num_passes=config.num_passes,
+            checkpoint_jacobi_passes=config.checkpoint_jacobi_passes,
         )
         self.post_layers = nn.ModuleList(
             [qwen3.Qwen3DecoderLayer(config, config.num_pre_layers + 1 + i) for i in range(config.num_post_layers)]
@@ -87,14 +93,14 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
         mode = self.config.execution_mode
         if cache is not None:
             mode = "autoregressive" if cache.get_seq_length() else (self.config.prefill_mode or mode)
-            if mode == "cyclic" and self.config.prefill_mode is None:
-                raise ValueError("set prefill_mode='cyclic' explicitly for cyclic prefill followed by AR decoding")
+            if mode in {"cyclic", "jacobi"} and self.config.prefill_mode is None:
+                raise ValueError("set prefill_mode explicitly for iterative prefill followed by AR decoding")
         if cache is None and mode == "autoregressive" and not self.training and not torch.is_grad_enabled():
             cache = DecoderCache(self.cache_prefix_slots)
             document_ids, position_ids, attention_mask = cache.prepare(
                 inputs_embeds, None, attention_mask, document_ids, None, position_ids,
             )
-        if cache is None or mode == "cyclic":
+        if cache is None or mode in {"cyclic", "jacobi"}:
             num_passes, num_gradient_passes = resolve_passes(self.config.num_passes, num_passes, 0 if cache is not None else num_gradient_passes)
             inputs_embeds, attention_mask, document_ids = prepare_decoder_inputs(
                 inputs_embeds, self.config, attention_mask, document_ids
@@ -111,6 +117,18 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
                 x, attention_mask=attention_mask, document_ids=document_ids, checkpoint_chunk_size=checkpoint_chunk_size,
                 backward_batch_size=backward_batch_size, split_state_vjp=split_state_vjp,
             )
+        elif mode == "jacobi":
+            if checkpoint_chunk_size:
+                raise ValueError("Jacobi execution does not support autoregressive checkpoint chunks")
+            result = self.block.forward_jacobi(
+                x, num_passes=num_passes, num_gradient_passes=num_gradient_passes,
+                document_ids=document_ids, output_final_state=cache is not None,
+            )
+            if cache is None:
+                x = result
+            else:
+                x, final_state = result
+                cache.update(*(tensor.flatten(1, 2) for tensor in final_state), self.config.num_pre_layers)
         else:
             groups = self.config.cyclic_groups if cyclic_groups is None else cyclic_groups
             if type(groups) is not int or groups < 1:

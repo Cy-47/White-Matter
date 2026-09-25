@@ -81,6 +81,7 @@ class DecoderModel(DecoderPreTrainedModel):
         use_cache: bool | None = None,
         output_hidden_states: bool | None = None,
         output_attentions: bool | None = None,
+        last_token_only: bool = False,
         return_dict: bool | None = None,
     ) -> BaseModelOutputWithPast | tuple:
         if (input_ids is None) == (inputs_embeds is None):
@@ -99,8 +100,8 @@ class DecoderModel(DecoderPreTrainedModel):
                 raise TypeError("past_key_values must be a DecoderCache with this decoder's KV owners")
         if position_ids is not None and use_cache and not past_key_values.get_seq_length() and getattr(
             self.config, "prefill_mode", None
-        ) == "cyclic":
-            raise ValueError("explicit position_ids require autoregressive prefill; cyclic suffix prefill is not supported")
+        ) in {"cyclic", "jacobi"}:
+            raise ValueError("explicit position_ids require autoregressive prefill; iterative suffix prefill is not supported")
         if position_ids is not None and not use_cache:
             raise NotImplementedError("explicit position_ids currently require cached inference")
         if self.config.output_hidden_states if output_hidden_states is None else output_hidden_states:
@@ -118,6 +119,7 @@ class DecoderModel(DecoderPreTrainedModel):
                 documents, positions, valid = past_key_values.prepare(
                     hidden, input_ids, attention_mask, document_ids, self.config.document_separator_token_id, position_ids
                 )
+                decoder_options = {"last_token_only": True} if last_token_only else {}
                 hidden = self.decoder(
                     hidden,
                     attention_mask=valid,
@@ -125,6 +127,7 @@ class DecoderModel(DecoderPreTrainedModel):
                     num_passes=num_passes,
                     past_key_values=past_key_values,
                     position_ids=positions,
+                    **decoder_options,
                 )
                 past_key_values.advance(positions, valid)
             else:
@@ -187,6 +190,9 @@ class DecoderForCausalLM(DecoderPreTrainedModel, GenerationMixin):
             use_cache=use_cache,
             output_hidden_states=output_hidden_states,
             output_attentions=output_attentions,
+            last_token_only=(isinstance(logits_to_keep, int) and logits_to_keep == 1
+                             and (past_key_values is not None or use_cache is True)
+                             and getattr(self.model.decoder, "supports_last_token_only", False)),
             return_dict=True,
         )
         hidden = outputs.last_hidden_state

@@ -58,7 +58,7 @@ def train(recipe: TrainingRecipe, args: argparse.Namespace) -> None:
         },
         "cache_dir": str(cache_dir),
     }
-    training_source_digest = training_source_sha256()
+    training_source_digest = training_source_sha256(model_config=recipe.model)
     metrics_provenance = {
         "resolved_config_sha256": resolved_config_sha256(cfg),
         "training_source_sha256": training_source_digest,

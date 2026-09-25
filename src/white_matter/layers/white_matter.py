@@ -7,11 +7,13 @@ K side are already applied at storage time inside ``KVPool``. The block selects 
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import lru_cache
+from importlib.util import find_spec
 from typing import Literal, Protocol
 
 import torch
 
-from white_matter.modules.documents import document_start_mask
+from white_matter.modules.documents import document_cu_seqlens, document_start_mask
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -20,6 +22,12 @@ from white_matter.modules.rotary import rotate_half
 from white_matter.ops import CyclicAttentionMetadata, cyclic_attention
 
 from .backends import attention_forward
+
+
+@lru_cache(maxsize=1)
+def _flash_attn_available() -> bool:
+    # Keep the base package importable without probing optional dependencies.
+    return find_spec("flash_attn") is not None
 
 
 class FeedbackAttention(Protocol):
@@ -39,6 +47,8 @@ class FeedbackAttention(Protocol):
         query_stride: int | None = None,
         query_offset: int = 0,
         cache_seqlens: torch.Tensor | None = None,
+        committed_prefix: bool = False,
+        jacobi: bool = False,
     ) -> torch.Tensor: ...
 
 
@@ -152,6 +162,43 @@ def _lckv_sdpa_attention(
     return out.transpose(1, 2)
 
 
+def _jacobi_document_keys(
+    key: torch.Tensor, value: torch.Tensor, document_ids: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Replace each document's first shifted key with the shared dummy key."""
+    batch, _, length, _ = key.shape
+    if document_ids.shape != (batch, length):
+        raise ValueError("Jacobi document IDs must match the query sequence")
+    slots = torch.arange(length, device=key.device).expand(batch, length)
+    slots = slots.masked_fill(document_start_mask(document_ids), 0)
+    indices = slots[:, None, :, None].expand_as(key)
+    return key.gather(2, indices), value.gather(2, indices), document_cu_seqlens(document_ids)
+
+
+@compiler_disable
+def _jacobi_flash_attention(
+    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
+    document_ids: torch.Tensor | None, scale: float,
+) -> torch.Tensor:
+    """Causal FlashAttention over dummy-shifted Jacobi keys, per document."""
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+
+    dtype = query.dtype if query.dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
+    q = query.transpose(1, 2).to(dtype)
+    if document_ids is None:
+        k, v = (tensor.transpose(1, 2).to(dtype) for tensor in (key, value))
+        return flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=scale, causal=True).to(query.dtype)
+    key, value, cu = _jacobi_document_keys(key, value, document_ids)
+    k, v = (tensor.transpose(1, 2).to(dtype).flatten(0, 1) for tensor in (key, value))
+    output = flash_attn_varlen_func(
+        q.flatten(0, 1), k, v,
+        cu_seqlens_q=cu, cu_seqlens_k=cu,
+        max_seqlen_q=query.shape[-2], max_seqlen_k=query.shape[-2],
+        dropout_p=0.0, softmax_scale=scale, causal=True,
+    )
+    return output.view(query.shape[0], query.shape[-2], query.shape[1], query.shape[-1]).to(query.dtype)
+
+
 class WhiteMatterAttention(nn.Module):
     """Qwen3 attention reading externally supplied keys and values."""
 
@@ -197,6 +244,8 @@ class WhiteMatterAttention(nn.Module):
         query_stride: int | None = None,
         query_offset: int = 0,
         cache_seqlens: torch.Tensor | None = None,
+        committed_prefix: bool = False,
+        jacobi: bool = False,
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
@@ -206,11 +255,11 @@ class WhiteMatterAttention(nn.Module):
         q_cos, q_sin = q_position_embeddings
         query_states = query_states * q_cos.unsqueeze(1) + rotate_half(query_states) * q_sin.unsqueeze(1)
         # Persistent KV already has the attention dtype; avoid copying the prefix.
-        if query_stride is None and cache_seqlens is None:
+        if query_stride is None and cache_seqlens is None and not jacobi:
             key_states, value_states = key_states.to(query_states.dtype), value_states.to(query_states.dtype)
-        if self.strict_causal and cache_seqlens is not None:
-            # Cached LCKV reads only committed earlier tokens. The current
-            # token's shared KV is published after the feedback-layer sweep.
+        if self.strict_causal and (committed_prefix or cache_seqlens is not None or decode_key_mask is not None):
+            # Sequential readers receive only earlier tokens. Prefix visibility
+            # is independent of whether storage is cached or differentiable.
             output = attention_forward(
                 query_states, key_states, value_states,
                 attention_mask=decode_key_mask,
@@ -227,9 +276,22 @@ class WhiteMatterAttention(nn.Module):
                 else _lckv_sdpa_attention
             )
             output = attention(query_states, key_states, value_states, document_ids, self.scaling)
+        elif jacobi:
+            # Jacobi's shifted keys have a dedicated FlashAttention schedule;
+            # ordinary decoder attention settings govern only other paths.
+            if query_states.is_cuda and self.head_dim <= 256 and _flash_attn_available() and not getattr(
+                self, "_force_jacobi_reference", False
+            ):
+                output = _jacobi_flash_attention(
+                    query_states, key_states, value_states, document_ids, self.scaling,
+                ).to(projection_dtype)
+            else:
+                output = cyclic_attention(
+                    query_states, key_states.to(query_states.dtype), value_states.to(query_states.dtype),
+                    query_stride=1, metadata=metadata, backend="reference",
+                ).to(projection_dtype).transpose(1, 2)
         elif query_stride is not None or (metadata is not None and decode_key_mask is None):
-            # Cyclic groups use the custom kernel; full Jacobi document attention
-            # retains its reference backend and explicit checkpoint metadata.
+            # Cyclic and depth-causal readers use explicit dummy-shifted bounds.
             backend: Literal["tilelang", "reference"] = (
                 "tilelang"
                 if query_stride is not None and query_states.is_cuda and not getattr(self, "_force_cyclic_reference", False)

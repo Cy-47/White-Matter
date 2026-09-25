@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import hashlib
 import json
+import importlib
 from pathlib import Path
 import random
 from collections.abc import Mapping
@@ -167,10 +168,17 @@ def restore_rng_states(
         torch.cuda.set_rng_state(cuda_state, cuda_device)
 
 
-def training_source_sha256() -> str:
+def training_source_sha256(*, model_config: Any | None = None) -> str:
     import white_matter
 
     owners = {"white_matter": Path(white_matter.__file__).resolve().parent, "training": Path(__file__).resolve().parent}
+    if model_config is not None:
+        module = importlib.import_module(type(model_config).__module__)
+        module_file = Path(module.__file__).resolve()
+        if not module_file.is_relative_to(owners["white_matter"]):
+            # Study-local model implementations must be part of the resume
+            # identity just as package model implementations are.
+            owners[f"external_model/{model_config.model_type}"] = module_file.parent
     digest = hashlib.sha256()
     for owner, directory in sorted(owners.items()):
         for path in sorted(directory.rglob("*.py")):

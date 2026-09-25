@@ -27,7 +27,7 @@ inputs = tokenizer("Hello", return_tensors="pt")
 outputs = model(**inputs)
 ```
 
-The model families are `white_matter`, `vanilla`, `lckv`, and `fusedkv`. WhiteMatter supports cyclic or exact autoregressive execution. For generation with a WhiteMatter checkpoint, choose `prefill_mode="cyclic"` for finite-pass prefill or `"autoregressive"` for exact sequential prefill. See [inference](docs/inference.md) and the [generation example](examples/generation.py) for cache use and supported modes.
+The model families are `white_matter`, `vanilla`, `lckv`, `fusedkv`, and `feedback_transformer`. WhiteMatter supports cyclic, Jacobi, or exact autoregressive execution. For generation with a WhiteMatter checkpoint, choose `prefill_mode="cyclic"` or `"jacobi"` for finite-pass prefill, or `"autoregressive"` for exact sequential prefill. See [inference](docs/inference.md) and the [generation example](examples/generation.py) for cache use and supported modes.
 
 The cyclic attention operator also works independently of the model classes:
 
@@ -52,10 +52,16 @@ torchrun --standalone --nproc-per-node=8 -m training.train \
 
 The configurations in [recipes/paper](recipes/paper) cover the reported WhiteMatter models and comparison models. [recipes/analysis](recipes/analysis) contains the exact autoregressive convergence control. Training writes a resume checkpoint and a Hugging Face export for evaluation. The [Slurm examples](slurm/README.md) show cluster launches.
 
+The [studies index](studies/README.md) contains the Figure 7a schedule matrix,
+Figure 7b rank and connectivity ablations, and the shared-mixture ablation.
+Each study keeps its recipes, evaluation protocol, and analysis alongside any
+study-specific model code. See [reproduction tools](docs/reproduction.md) for
+repository layout, cache requirements, and checkpoint conversion.
+
 Evaluate held-out perplexity or run the paper's zero-shot task suite:
 
 ```bash
-pip install 'lm-eval @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@9b2b9280330a3a5b20953346c8b51e23c4c8c4e2'
+pip install 'lm-eval @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@ddd67220430a2470529f25fd5c05a576ca1057a0'
 ```
 
 ```bash
@@ -65,7 +71,12 @@ python -m evals.lm_eval --model outputs/white_matter_k8/final \
   --output outputs/white_matter_k8/lm_eval.json
 ```
 
-The pinned [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) revision matches the paper's evaluation setup.
+The pinned [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness)
+release is v0.4.13. Evaluation outputs record the installed harness revision,
+task versions, and task configurations. Compare checkpoints using the same
+evaluation settings. SQuAD-Completion v1 normalizes whitespace in prompts and
+answers; its scores are not comparable to v0. See [reproduction tools](docs/reproduction.md)
+for additional evaluation tasks.
 
 ## Benchmarks and validation
 
@@ -73,7 +84,7 @@ The [benchmark guide](benchmarks/README.md) covers training throughput, prefill,
 
 ```bash
 python -m pytest -m 'not gpu'
-ruff check src training evals examples benchmarks tests scripts
+ruff check src training evals examples benchmarks tests scripts studies
 ```
 
 GPU tests exercise the optional kernels and compiled execution. Run them on compatible hardware with the `gpu` extra installed.

@@ -37,6 +37,8 @@ class FeedbackDecoderLayer(nn.Module):
         query_stride: int | None = None,
         query_offset: int = 0,
         cache_seqlens: torch.Tensor | None = None,
+        committed_prefix: bool = False,
+        jacobi: bool = False,
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.self_attn(
             self.input_layernorm(hidden_states),
@@ -49,6 +51,8 @@ class FeedbackDecoderLayer(nn.Module):
             query_stride=query_stride,
             query_offset=query_offset,
             cache_seqlens=cache_seqlens,
+            committed_prefix=committed_prefix,
+            jacobi=jacobi,
         )
         mlp_input = self.post_attention_layernorm(hidden_states)
         mlp_output = checkpoint_pointwise(self.mlp, mlp_input) if torch.is_grad_enabled() else self.mlp(mlp_input)

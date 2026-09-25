@@ -104,7 +104,7 @@ def worker(
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Build the exact 20B-token FineWeb-Edu cache used in the paper.")
+    ap = argparse.ArgumentParser(description="Build a 20B-token FineWeb-Edu cache with the paper packing protocol.")
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--workers", type=int, default=8)
     args = ap.parse_args()

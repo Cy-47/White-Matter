@@ -2,9 +2,19 @@
 
 Run from the checkout after installing `pip install -e '.[benchmarks]'`. GPU workloads
 require compatible FlashAttention and TileLang installations. CCE recipes additionally
-require cut-cross-entropy. These utilities are checkout tools, not part of the pip API.
+require the [documented Cut Cross-Entropy revision](../docs/reproduction.md).
+These utilities are checkout tools, not part of the pip API.
 
 ## Full models
+
+The Feedback Transformer control is `recipes/benchmarks/feedback_transformer_1p3b.yaml`.
+It uses the paper's learned, static softmax mixture of the embedding and all
+layer outputs, one shared K/V cache, and exact sequential prefill/decode over
+the full causal prefix. It is a Qwen3-shaped architecture control; its random
+weights measure runtime, not the quality of Fan et al.'s original checkpoint.
+For the paper's runtime workload, use a 2,048-token prompt, 128 timed
+decode steps (`--tokens 129`), the full resident prefill batch
+(`--prefill-batch-size 0`), and a 40 GiB budget with 0.5 GiB headroom.
 
 Use recipe YAML files for seeded random weights, or local HF exports for generation.
 Recipe initialization does not require downloading weights or data. It measures execution,
@@ -22,6 +32,9 @@ python -m benchmarks.generation --recipes recipes/paper/white_matter_1p3b.yaml r
 Generation is compiled and uses FlashAttention decoding, with CUDA graph replay enabled
 by default. `--tokens` includes the first token selected during prefill: 129 means 128
 timed decode steps. Decode prefix preparation is excluded. Each cache row owns storage.
+The Feedback Transformer's cached loop stays in Python so a 2,048-token prefill
+does not trace into one enormous graph. With `--compiled`, the reusable one-token
+block is compiled as a full graph; decode also uses CUDA graph replay.
 Use `--no-compiled` to benchmark eager model execution when whole-model compilation
 is impractical; the run record retains this setting.
 `--prefill-batch-size 0` processes the complete resident batch; the default is one.

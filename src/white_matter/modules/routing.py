@@ -30,6 +30,16 @@ def _init_logits(rows: int, cols: int, mode: str) -> torch.Tensor:
             logits[row, min(row + 1, cols - 1)] = peak
         return logits
 
+    if base == "identity":
+        if rows != cols:
+            raise ValueError(f"identity init requires square matrix, got ({rows}, {cols})")
+        logits.diagonal().fill_(peak)
+        return logits
+
+    if base == "top":
+        logits[:, -1] = peak
+        return logits
+
     raise ValueError(f"unknown router prior: {mode}")
 
 
@@ -44,20 +54,25 @@ class Router(nn.Module):
         *,
         router_prior: str,
         layer_stride: int,
+        dynamic: bool = True,
     ) -> None:
         super().__init__()
         if layer_stride < 1:
             raise ValueError("router_layer_stride must be positive")
+        if type(dynamic) is not bool:
+            raise ValueError("router_dynamic must be boolean")
         self.num_layers = num_layers
         self.layer_stride = layer_stride
         self.source_start = (num_layers - 1) % layer_stride
         self.hidden_size = hidden_size
         self.num_kv_channels = num_kv_channels
         self.router_prior = router_prior
+        self.dynamic = dynamic
 
         self.num_sources = len(range(self.source_start, num_layers, layer_stride))
         self.linear = nn.Linear(self.num_sources * hidden_size, num_kv_channels * num_layers, bias=True)
         self.reset_parameters()
+        self.linear.weight.requires_grad_(dynamic)
 
     @torch.no_grad()
     def reset_parameters(self) -> None:
@@ -68,6 +83,12 @@ class Router(nn.Module):
         batch, sequence_length, num_layers, hidden_size = stacked.shape
         if (num_layers, hidden_size) != (self.num_layers, self.hidden_size):
             raise ValueError(f"router expected (*,*,{self.num_layers},{self.hidden_size}), got {tuple(stacked.shape)}")
+        if not self.dynamic:
+            # The learned bias is the complete static mixture. Match the dtype
+            # a skipped linear projection would produce under autocast.
+            dtype = torch.get_autocast_dtype(stacked.device.type) if torch.is_autocast_enabled(stacked.device.type) else stacked.dtype
+            logits = self.linear.bias.to(dtype).view(1, 1, self.num_kv_channels, self.num_layers)
+            return logits.expand(batch, sequence_length, -1, -1).to(stacked.dtype)
         selected = stacked[:, :, self.source_start :: self.layer_stride]
         # Striding limits router context; the predicted mixture still spans all layers.
         context = selected.reshape(batch, sequence_length, self.num_sources * hidden_size)

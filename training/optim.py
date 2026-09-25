@@ -238,6 +238,7 @@ def is_no_decay_parameter(name: str) -> bool:
         (
             "pre_mix_k_weight",
             "pre_mix_v_weight",
+            "pre_mix_weight",
             "k_norm_weight",
             "k_gain",
             "v_gain",

@@ -31,6 +31,7 @@ class WhiteMatterBlock(nn.Module):
         rotary_emb: PositionEmbedding,
         *,
         num_passes: int = 3,
+        checkpoint_jacobi_passes: bool = False,
     ) -> None:
         super().__init__()
         if not layers or len(layers) != kv_pool.num_layers:
@@ -38,6 +39,7 @@ class WhiteMatterBlock(nn.Module):
         self.num_layers = len(layers)
         self.num_kv_channels = kv_pool.num_kv_channels
         self.num_passes = num_passes
+        self.checkpoint_jacobi_passes = checkpoint_jacobi_passes
         self._cyclic_schedule_cache: dict[
             tuple[int, int, str], tuple[list[torch.Tensor], torch.Tensor]
         ] = {}
@@ -88,7 +90,10 @@ class WhiteMatterBlock(nn.Module):
         if document_ids is not None:
             slots = torch.arange(x_in.shape[1], device=x_in.device)
             metadata = prepare_feedback_metadata(document_ids, [slots], x_in.shape[1])[0]
-        hidden, states = run_feedback_layers(self.layers, x_in, keys, values, q_pos_emb, metadata=metadata)
+        hidden, states = run_feedback_layers(
+            self.layers, x_in, keys, values, q_pos_emb,
+            document_ids=document_ids, metadata=metadata, jacobi=True,
+        )
         return torch.stack(states, dim=1), hidden
 
     def _autoregressive_step(

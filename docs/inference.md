@@ -1,6 +1,6 @@
 # Inference and benchmarking
 
-WhiteMatter, Vanilla, and LCKV support Hugging Face `forward` and `generate` with dynamic or static caches. FusedKV currently supports uncached execution only. For CUDA inference, install the `gpu` extra and load the model with BF16 weights and FlashAttention:
+WhiteMatter, Vanilla, LCKV, and Feedback Transformer support Hugging Face `forward` and `generate` with dynamic or static caches. FusedKV supports `generate(use_cache=False)`, recomputing the full prefix at each step. The evaluation harness selects this automatically and uses the same Hugging Face generation controls for every family. For CUDA inference, install the `gpu` extra and load the model with BF16 weights and FlashAttention:
 
 ```python
 import torch
@@ -20,9 +20,16 @@ with torch.no_grad():
     tokens = model.generate(input_ids.cuda(), max_new_tokens=32, use_cache=True)
 ```
 
-WhiteMatter's `prefill_mode="cyclic"` uses the configured finite number of cyclic passes for the prompt; `"autoregressive"` processes it sequentially. Both modes continue autoregressively during cached decoding. Set the mode explicitly when a WhiteMatter checkpoint does not specify one. LCKV uses Jacobi prefill by default and also accepts `"autoregressive"` prefill.
+WhiteMatter's `prefill_mode="cyclic"` uses cyclic passes for the prompt, while `"jacobi"` uses token-parallel Jacobi passes and `"autoregressive"` processes it sequentially. All three modes continue autoregressively during cached decoding. Set the mode explicitly when a WhiteMatter checkpoint does not specify one. LCKV uses Jacobi prefill by default and also accepts `"autoregressive"` prefill.
+
+Jacobi sweeps use FlashAttention on CUDA when it is installed, including packed documents; otherwise they use the PyTorch reference. This selection is independent of the ordinary decoder attention setting.
 
 Dynamic caches support padding, document boundaries, and beam reordering. Static caches are for unpadded, single-document inference and require a capacity. A supplied cache persists across calls until reset; a generation call does not reset it. `document_separator_token_id=None` treats the prompt as one document even if it contains EOS. Explicit document IDs can instead define packed-document boundaries.
+
+Feedback Transformer currently requires unpadded inputs and uses exact sequential
+prefill. Its benchmark recipe measures an architecture control with random weights.
+Its uncached forward supports differentiation, but the shared training CLI's
+autoregressive checkpointing is not implemented for this family.
 
 For fixed-batch CUDA decoding with bounded prefill memory, see [examples/generation.py](../examples/generation.py). It shows `allocate_inference_cache`, `prefill`, and `DecodeGraph`. The example uses greedy decoding; `model.generate` provides Hugging Face sampling and stopping policies. Multi-turn cyclic suffix prefill, cache rollback, and paging are not supported.
 

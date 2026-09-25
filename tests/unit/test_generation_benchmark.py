@@ -92,7 +92,7 @@ def test_worker_failure_is_persisted_before_raising(tmp_path, monkeypatch):
     assert not json.loads((run / 'summary.json').read_text())['complete']
 
 
-@pytest.mark.parametrize('family', ['white_matter', 'vanilla'])
+@pytest.mark.parametrize('family', ['white_matter', 'vanilla', 'feedback_transformer'])
 @pytest.mark.parametrize('device', ['cpu', pytest.param('cuda', marks=[
     pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason='requires CUDA')])])
 def test_decode_preparation_copies_real_prefix_into_independent_rows(family, device):
