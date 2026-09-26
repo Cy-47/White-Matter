@@ -135,6 +135,7 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
                 raise ValueError("cyclic_groups must be a positive integer")
             state = None
             if (cache is not None and cache.capacity is not None and x.is_cuda and not self.training
+                    and torch.is_autocast_enabled("cuda") and torch.get_autocast_dtype("cuda") == torch.bfloat16
                     and attention_mask is None and document_ids is None and x.shape[1] > groups):
                 feedback = cache.layers[self.config.num_pre_layers]
                 if not feedback.is_initialized:

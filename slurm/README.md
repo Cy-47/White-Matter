@@ -50,3 +50,9 @@ sbatch slurm/benchmark_generation.sbatch --models /path/to/wm /path/to/vanilla \
 
 See [the measurement protocol](../docs/inference.md). Use an otherwise idle GPU
 and identical precision and execution options for both model families.
+
+`sbatch slurm/validate.sbatch` runs every GPU-marked test on two GPUs and writes
+`outputs/validation-JOB_ID/gpu.xml`. Install the training, GPU, and development
+extras, plus the pinned [evaluation harness](../README.md#reproduce-the-experiments)
+and [Cut Cross-Entropy](../docs/reproduction.md) dependencies first. The validation
+job rejects skipped tests.

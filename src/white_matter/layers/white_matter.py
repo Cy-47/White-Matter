@@ -103,6 +103,11 @@ def _lckv_flash_attention(
     q_sel = q[q_keep].contiguous()
     k_sel = k[k_keep].contiguous()
     v_sel = v[k_keep].contiguous()
+    if q_sel.shape[0] == 0:
+        # Singleton documents have no visible past tokens. FlashAttention
+        # rejects an empty batch; retain zero gradients to all three inputs.
+        zero = (q_sel.sum() + k_sel.sum() + v_sel.sum()).to(Q.dtype)
+        return Q.new_zeros(B, T, Hq, d) + zero
     # q and k each drop exactly one token per document, so per-doc counts match
     # and the two cu_seqlens are identical; build once.
     cu = _selected_cu_seqlens(is_first, q_keep)

@@ -51,7 +51,12 @@ def snapshot_source(directory: Path) -> dict:
             with tempfile.TemporaryDirectory(dir=target.parent) as staging:
                 complete = Path(staging) / target.name
                 shutil.copyfile(path, complete)
-                complete.replace(target)
+                # Publish once: replacing another writer's inode can invalidate
+                # concurrent readers on shared filesystems.
+                try:
+                    target.hardlink_to(complete)
+                except FileExistsError:
+                    pass
         if digest(target) != hashes[name]:
             raise RuntimeError(f'source changed while taking snapshot: {name}')
     return dict(sha256=identity, files=hashes, archive=str(archive.resolve()))

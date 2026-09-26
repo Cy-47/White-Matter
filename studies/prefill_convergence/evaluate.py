@@ -10,7 +10,8 @@ import torch
 from benchmarks._measurement import checkpoint_files, digest, environment, write_json, snapshot_source, verify_sources
 from evals.execution import execution, score_hidden
 from evals.loading import load_complete_model
-from studies.prefill_convergence.protocol import MODES, validate_checkpoint
+from studies.prefill_convergence.protocol import MODES, schedules, validate_checkpoint
+from studies.prefill_convergence.contiguous import forward_contiguous
 from white_matter.models import register_models
 
 
@@ -26,7 +27,7 @@ def load_windows(path):
 @torch.inference_mode()
 def measure_curves(model, ids, *, limits, batch_size):
     """Run each trajectory once; observe outputs without restarting its passes."""
-    if batch_size < 1 or not len(ids) or any(n < 1 for n in limits.values()):
+    if batch_size < 1 or not len(ids) or not limits or set(limits) - MODES.keys() or any(n < 1 for n in limits.values()):
         raise ValueError('positive batch, data, and pass limits required')
     config = model.config
     if config.model_type != 'white_matter' or config.num_pre_layers or config.num_post_layers:
@@ -51,8 +52,11 @@ def measure_curves(model, ids, *, limits, batch_size):
                         totals[mode][passes-1] += score_hidden(normalized, batch, model.lm_head.weight)
                     if mode == 'jacobi':
                         block.forward_jacobi(x, num_passes=limit, num_gradient_passes=0, on_pass=observe)
+                    elif mode.startswith('contiguous'):
+                        forward_contiguous(block, x, num_passes=limit, chunks=MODES[mode], on_pass=observe)
                     else:
                         block(x, num_passes=limit, cyclic_groups=MODES[mode], num_gradient_passes=0, on_pass=observe)
+                print(f'quality: {min(start+batch_size, len(ids))}/{len(ids)} windows', flush=True)
     finally:
         config.document_separator_token_id = separator
     return dict(ar_ce_sum=ar_sum, targets=len(ids)*(ids.shape[1]-1), curves=totals)
@@ -68,6 +72,8 @@ def main():
     parser.add_argument('--count', type=int, default=192)
     parser.add_argument('--jacobi-passes', type=int, default=80)
     parser.add_argument('--cyclic-passes', type=int, default=32)
+    parser.add_argument('--contiguous-passes', type=int, default=80)
+    parser.add_argument('--modes', nargs='+', choices=MODES, default=list(MODES))
     args = parser.parse_args()
     if args.output.exists():
         raise FileExistsError(args.output)
@@ -80,7 +86,8 @@ def main():
     validate_checkpoint(model.config)
     identity = checkpoint_files(args.model)
     ids = torch.from_numpy(windows[args.offset:args.offset+args.count].astype(np.int64))
-    limits = {mode: args.jacobi_passes if mode == 'jacobi' else args.cyclic_passes for mode in MODES}
+    limits = {mode: args.jacobi_passes if mode == 'jacobi' else args.contiguous_passes
+              if mode.startswith('contiguous') else args.cyclic_passes for mode in args.modes}
     source = snapshot_source(args.output.parent/"sources")
     result = measure_curves(model, ids, limits=limits, batch_size=args.batch_size)
     if identity != checkpoint_files(args.model):
@@ -88,6 +95,7 @@ def main():
     verify_sources(source)
     write_json(args.output, dict(
         source=source,
+        schedules=schedules(limits),
         protocol='prefill_convergence', precision='fp32', model=args.model, checkpoint=identity,
         windows_sha256=meta['sha256'], offset=args.offset, count=args.count,
         sequence_length=2048, environment=environment(0 if device == 'cuda' else None), **result,

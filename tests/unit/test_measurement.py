@@ -157,14 +157,18 @@ def test_concurrent_snapshots_never_publish_partial_files(tmp_path, monkeypatch)
     monkeypatch.setattr(measurement, 'source_files', lambda: {'model.py': code})
     copy = measurement.shutil.copyfile
     nested = []
+    published = []
 
     def interrupted_copy(source, target):
         if not nested:
             Path(target).write_text('partial')
             nested.append(None)
             nested[0] = measurement.snapshot_source(tmp_path / 'archive')
+            published.append((Path(nested[0]['archive']) / 'model.py').stat().st_ino)
         return copy(source, target)
 
     monkeypatch.setattr(measurement.shutil, 'copyfile', interrupted_copy)
     actual = measurement.snapshot_source(tmp_path / 'archive')
     assert nested[0] == actual
+    # Replacing another writer's published inode can invalidate NFS readers.
+    assert (Path(actual['archive']) / 'model.py').stat().st_ino == published[0]

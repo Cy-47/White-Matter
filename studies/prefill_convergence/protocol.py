@@ -5,8 +5,15 @@ from pathlib import Path
 
 from training.recipes import load_recipe, model_recipe_keys
 
-MODES = {"jacobi": None, **{f"cyclic{g}": g for g in (2, 4, 8, 16, 32)}}
+GROUPS = (2, 4, 8, 16, 32, 64)
+MODES = {"jacobi": None, **{f"{kind}{g}": g for kind in ("cyclic", "contiguous") for g in GROUPS}}
 RECIPE = Path(__file__).parent / "recipes/exact_ar_4l.yaml"
+
+
+def schedules(modes):
+    return {mode: dict(partition="contiguous" if mode.startswith("contiguous") else
+                       "cyclic" if mode.startswith("cyclic") else "jacobi",
+                       groups=MODES[mode], update="after_group", version=1) for mode in modes}
 
 
 def validate_checkpoint(config):

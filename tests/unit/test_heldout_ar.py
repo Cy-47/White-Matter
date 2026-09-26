@@ -22,9 +22,11 @@ def test_ar_evaluation_matches_complete_model(family, separator, device):
     options = {"num_kv_channels": 1} if family == "white_matter" else {}
     config = AutoConfig.for_model(
         family, vocab_size=31, eos_token_id=30, document_separator_token_id=separator,
-        hidden_size=16, intermediate_size=32, num_hidden_layers=4,
+        hidden_size=128 if device == "cuda" else 16,
+        intermediate_size=256 if device == "cuda" else 32, num_hidden_layers=4,
         num_pre_layers=1, num_post_layers=1, num_attention_heads=2,
-        num_key_value_heads=1, head_dim=8, num_passes=1, residual_dtype="bf16", **options,
+        num_key_value_heads=1, head_dim=64 if device == "cuda" else 8,
+        num_passes=1, residual_dtype="bf16", **options,
     )
     config._attn_implementation = "sdpa"
     model = AutoModelForCausalLM.from_config(config).to(device).eval()

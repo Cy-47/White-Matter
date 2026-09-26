@@ -69,13 +69,14 @@ def source_tensors(raw: dict) -> dict[str, torch.Tensor]:
     return dict(raw)
 
 
-def convert(label: str, source_path: Path, dest: Path) -> None:
-    cls, dimensions, extra = SPECS[label]
+def convert(label: str, source_path: Path, dest: Path, *, config=None) -> None:
+    if config is None:
+        cls, dimensions, extra = SPECS[label]
+        config = cls(**dimensions, **extra)
     if dest.exists():
         raise FileExistsError(f"refusing to overwrite {dest}")
     raw = torch.load(source_path, map_location="cpu", weights_only=False, mmap=True)
     source = source_tensors(raw)
-    config = cls(**dimensions, **extra)
     register_models()
     with torch.device("meta"):
         template = AutoModelForCausalLM.from_config(config)

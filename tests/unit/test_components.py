@@ -227,6 +227,6 @@ def test_inference_pool_stores_the_keys_consumed_by_attention():
     with torch.autocast("cuda", dtype=torch.bfloat16):
         expected = pool.project_sequence(stacked, rope)
         actual = pool.eval().project_sequence(stacked, rope)
-    assert expected[0].dtype == torch.float32
+    assert expected[0].dtype == expected[1].dtype == torch.bfloat16
     assert actual[0].dtype == actual[1].dtype == torch.bfloat16
-    torch.testing.assert_close(actual, tuple(t.bfloat16() for t in expected), rtol=0, atol=0)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)

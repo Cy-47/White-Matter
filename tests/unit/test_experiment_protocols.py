@@ -86,12 +86,12 @@ def test_execution_restores_settings_after_failure():
 
 
 def quality_shard(offset, count, loss):
-    from studies.prefill_convergence.protocol import MODES
+    from studies.prefill_convergence.protocol import MODES, schedules
     tokens = count*2047
     return dict(protocol='prefill_convergence', precision='fp32', checkpoint={'weights': 'same'},
                 windows_sha256='same', sequence_length=2048, offset=offset, count=count,
                 targets=tokens, ar_ce_sum=3*tokens,
-                curves={mode: [loss*tokens, 3.0*tokens] for mode in MODES})
+                schedules=schedules(MODES), curves={mode: [loss*tokens, 3.0*tokens] for mode in MODES})
 
 
 def test_shards_pool_losses_before_threshold_and_reject_overlap():
