@@ -86,10 +86,15 @@ def plot(kind, source, output):
             pairs = sorted({(n, g) for n, g, _ in index})
             modes = list(dict.fromkeys(mode for _, _, mode in index))
             for ax, metric in zip(axes, metrics, strict=True):
-                values = np.array([[float(index[n, g, m][metric] or 'nan') for m in modes] for n, g in pairs])
+                values = np.array([[float(index[n, g, m][metric] or
+                                          index[n, g, m].get('jacobi_max_evaluated_pass', 32))
+                                    for m in modes] for n, g in pairs])
                 image = ax.imshow(values, aspect='auto')
                 for i, j in np.ndindex(values.shape):
-                    text = '>32' if np.isnan(values[i, j]) else f'{values[i, j]:.2f}' if metric != metrics[-1] else f'{values[i, j]:.0f}'
+                    row = index[*pairs[i], modes[j]]
+                    censored = metric == metrics[-1] and not row[metric]
+                    text = (f'>{values[i, j]:.0f}' if censored else
+                            f'{values[i, j]:.2f}' if metric != metrics[-1] else f'{values[i, j]:.0f}')
                     ax.text(j, i, text, ha='center', va='center', fontsize=8)
                 ax.set_xticks(range(len(modes)), modes)
                 ax.set_yticks(range(len(pairs)), [f'ng={n}, grad={g}' for n, g in pairs])

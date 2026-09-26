@@ -9,7 +9,7 @@ import math
 from pathlib import Path
 
 from studies.protocol import PAPER_TEST_TARGETS
-from studies.schedules.matrix import GRAD, MODES, NO_GRAD, SEEDS
+from studies.schedules.matrix import GRAD, MODES, NO_GRAD, SEEDS, evaluation_horizon
 
 
 def _read_curve(path: Path, seed: int, arm: str, mode: str) -> dict[int, float]:
@@ -23,8 +23,11 @@ def _read_curve(path: Path, seed: int, arm: str, mode: str) -> dict[int, float]:
     ):
         raise ValueError(f"invalid Figure 7a result: {path}")
     curve = {int(row["n_passes"]): float(row["perplexity"]) for row in result["rows"]}
-    if len(result["rows"]) != 32 or set(curve) != set(range(1, 33)):
-        raise ValueError(f"Figure 7a pass curve must cover 1..32: {path}")
+    count = len(result["rows"])
+    minimum = evaluation_horizon(arm, mode)
+    if count < minimum or set(curve) != set(range(1, count + 1)) or (mode != "tp" and count != 32):
+        raise ValueError(f"Figure 7a {mode} curve requires consecutive passes from 1 through {minimum}"
+                         f"{' or beyond' if mode == 'tp' else ''}: {path}")
     if any(not math.isfinite(value) or value <= 0 for value in curve.values()):
         raise ValueError(f"invalid perplexity in {path}")
     return curve
@@ -34,11 +37,14 @@ def curve_metrics(native, cyclic16, tp) -> dict:
     """Derive metrics after any seed averaging, with earliest-pass tie breaking."""
     best_pass = min(sorted(native), key=native.get)
     best = native[best_pass]
+    crossing = next((n for n in sorted(tp) if tp[n] <= best * 1.01), None)
     return {
         "native_best_perplexity": best,
         "native_best_pass": best_pass,
         "cyclic16_pass32_perplexity": cyclic16[32],
-        "jacobi_passes_within_1pct": next((n for n in sorted(tp) if tp[n] <= best * 1.01), None),
+        "jacobi_passes_within_1pct": crossing,
+        "jacobi_passes_within_1pct_censored": crossing is None,
+        "jacobi_max_evaluated_pass": max(tp),
     }
 
 
@@ -56,11 +62,14 @@ def collect(root: Path) -> tuple[list[dict], list[dict]]:
                     cyclic16 = native if mode == "c16" else _read_curve(
                         directory / "eval_cyclic16.json", seed, arm, "cyclic16",
                     )
-                    tp = native if mode == "tp" else _read_curve(directory / "eval_tp.json", seed, arm, "tp")
+                    tp_path = directory / "eval_tp.json"
+                    tp = native if mode == "tp" and not tp_path.exists() else _read_curve(tp_path, seed, arm, "tp")
                     curves.append((native, cyclic16, tp))
                     per_seed.append(dict(seed=seed, **identity, **curve_metrics(native, cyclic16, tp)))
+                if any(set(curve[2]) != set(curves[0][2]) for curve in curves[1:]):
+                    raise ValueError(f"Figure 7a Jacobi pass horizons differ across seeds: {arm}")
                 means = [
-                    {p: sum(curve[index][p] for curve in curves) / len(curves) for p in range(1, 33)}
+                    {p: sum(curve[index][p] for curve in curves) / len(curves) for p in curves[0][index]}
                     for index in range(3)
                 ]
                 averaged.append(dict(**identity, **curve_metrics(*means)))

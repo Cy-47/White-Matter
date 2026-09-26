@@ -14,7 +14,7 @@ from studies.protocol import (
     PAPER_SEQUENCE_LENGTH, PAPER_TEST_SEQUENCES, PAPER_TEST_TARGETS,
     evaluate_fixed_passes, validate_paper_cache,
 )
-from studies.schedules.matrix import arm_values, recipe_path, validate_recipe
+from studies.schedules.matrix import arm_values, evaluation_horizon, recipe_path, validate_recipe
 from training.data import TokenCacheDataset
 from training.precision import configure_precision
 from training.recipes import load_recipe, model_recipe_keys
@@ -53,12 +53,14 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--mode", choices=("native", "cyclic16", "tp"), required=True)
     parser.add_argument("--first-pass", type=int, default=1)
-    parser.add_argument("--last-pass", type=int, default=32)
+    parser.add_argument("--last-pass", type=int, help="default: paper ceiling for this arm and mode (32, 96, or 128)")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
-    if args.first_pass < 1 or args.last_pass < args.first_pass or args.last_pass > 32:
-        parser.error("pass range must be inside 1..32")
+    if args.first_pass < 1 or (args.last_pass is not None and args.last_pass < args.first_pass):
+        parser.error("pass range must be positive and increasing")
+    if args.mode != "tp" and (args.last_pass or args.first_pass) > 32:
+        parser.error("native and cyclic16 pass ranges must be inside 1..32")
     if args.batch_size < 1:
         parser.error("--batch-size must be positive")
     if args.output.exists():
@@ -72,6 +74,10 @@ def main() -> None:
     configure_precision(device)
     model = load_complete_model(args.model, dtype=torch.float32).to(device).eval()
     seed, arm = validate_checkpoint(model.config)
+    if args.last_pass is None:
+        args.last_pass = evaluation_horizon(arm, args.mode)
+    if args.first_pass > args.last_pass:
+        parser.error("--first-pass exceeds the default observation ceiling; specify --last-pass")
     if args.compile and device.type == "cuda":
         from training.compile import compile_feedback
 

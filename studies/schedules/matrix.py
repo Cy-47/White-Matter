@@ -16,6 +16,14 @@ MODES = ("tp", "c4", "c8", "c16")
 _ARM = re.compile(r"ng([124])_g([12])_(tp|c4|c8|c16)\Z")
 
 
+def evaluation_horizon(arm: str, mode: str) -> int:
+    """Paper observation ceilings; native and C16 references stay at 32."""
+    arm_values(arm)
+    if mode not in ("native", "cyclic16", "tp"):
+        raise ValueError(f"unknown evaluation mode: {mode}")
+    return {"ng4_g1_c8": 128, "ng4_g2_c4": 96, "ng4_g2_c16": 96}.get(arm, 32) if mode == "tp" else 32
+
+
 def arm_values(arm: str) -> tuple[int, int, str]:
     match = _ARM.fullmatch(arm)
     if match is None:

@@ -25,7 +25,7 @@ curve. Use `studies/schedules/slurm/evaluate.sbatch` with mode `native`,
 directory. For C16-trained cells the native curve is also the C16 curve; for
 TP-trained cells it is also the TP curve. Once all curves are available,
 `python -m studies.schedules.analyze` writes per-seed and two-seed mean
-summaries. This 32-pass analysis belongs to Figure 7a; Figure 7b uses the
+summaries. This analysis belongs to Figure 7a; Figure 7b uses the
 three-pass protocol in its own study.
 
 Aggregate both seeds' curves before selecting metrics:
@@ -37,5 +37,17 @@ python -m studies.schedules.analyze --results-dir outputs/studies/schedules \
 ```
 
 The mean table computes each metric from the pointwise mean perplexity curve,
-not by averaging separately selected seed metrics. An empty convergence-pass
-field means the threshold was not reached within 32 passes.
+not by averaging separately selected seed metrics. Native and C16 curves cover
+exactly passes 1–32. Jacobi defaults to the paper's observation ceiling for each
+arm: 128 for `ng4_g1_c8`, 96 for `ng4_g2_c4` and `ng4_g2_c16`, and 32 otherwise.
+These defaults apply to both seeds and the Slurm evaluator. The evaluator's
+`--last-pass` option can extend Jacobi curves further. Aggregation requires at
+least the paper's ceiling and identical Jacobi pass ranges across seeds.
+
+An empty `jacobi_passes_within_1pct` field means the threshold was not reached:
+`jacobi_passes_within_1pct_censored` is true and `jacobi_max_evaluated_pass`
+records the observation ceiling. The schedule plot renders this as a bound
+such as `>96`. The paper's averaged curves cross at 36 for `ng4_g2_c4` and 105
+for `ng4_g1_c8`; `ng4_g2_c16` remains above the threshold through pass 96.
+If a TP-trained cell has a separate `eval_tp.json`, aggregation uses it;
+otherwise its native curve supplies the Jacobi curve.
