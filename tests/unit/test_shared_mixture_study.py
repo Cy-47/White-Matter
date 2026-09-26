@@ -8,7 +8,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 from studies.shared_mixture.evaluate_heldout import evaluate_three_pass, validate_checkpoint
 from studies.shared_mixture.model import SharedMixtureConfig, SharedMixtureKVPool, register_model
-from studies.paper_20k import PAPER_TEST_TARGETS, validate_paper_cache
+from studies.protocol import PAPER_TEST_TARGETS, validate_paper_cache
 from training.checkpoint import training_source_sha256
 from training.optim import partition_optimizer_parameters
 from training.recipes import load_recipe
@@ -80,8 +80,8 @@ def test_one_mixture_feeds_independent_kv_pairs_and_all_gradients():
 
 def test_study_recipe_is_trainable_and_matched_to_control():
     register_model()
-    control = load_recipe("studies/rank_20k/recipes/k16.yaml")
-    shared = load_recipe("studies/shared_mixture/recipes/shared_k16_20k.yaml")
+    control = load_recipe("studies/rank/recipes/k16.yaml")
+    shared = load_recipe("studies/shared_mixture/recipes/shared_k16.yaml")
     assert shared.model.model_type == SharedMixtureConfig.model_type
     assert (shared.steps, shared.global_batch_size, shared.data.sequence_length) == (20_000, 8, 2048)
     assert (shared.no_gradient_passes, shared.gradient_passes) == (1, 2)
@@ -101,8 +101,8 @@ def test_paper_shape_parameter_counts():
     register_model()
     expected = {"control": 131_846_656, "shared": 129_806_352}
     for arm, count in expected.items():
-        path = ("studies/rank_20k/recipes/k16.yaml" if arm == "control"
-                else "studies/shared_mixture/recipes/shared_k16_20k.yaml")
+        path = ("studies/rank/recipes/k16.yaml" if arm == "control"
+                else "studies/shared_mixture/recipes/shared_k16.yaml")
         config = load_recipe(path).model
         with torch.device("meta"):
             model = AutoModelForCausalLM.from_config(config)
@@ -183,8 +183,8 @@ def test_paper_protocol_rejects_other_cache_and_checkpoint(tmp_path):
         validate_checkpoint(SharedMixtureConfig(num_kv_channels=16))
     register_model()
     for filename, name in (
-        ("studies/rank_20k/recipes/k16.yaml", "rank20k_k16"),
-        ("studies/shared_mixture/recipes/shared_k16_20k.yaml", "shared_mixture_k16_20k"),
+        ("studies/rank/recipes/k16.yaml", "rank_k16"),
+        ("studies/shared_mixture/recipes/shared_k16.yaml", "shared_mixture_k16"),
     ):
         cfg = load_recipe(filename).model
         cfg.training_step = 20_000

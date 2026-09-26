@@ -6,7 +6,7 @@ import pytest
 from training.recipes import load_recipe, per_rank_batch_size
 
 PAPER_RECIPES = Path(__file__).parents[2] / "recipes" / "paper"
-ANALYSIS_RECIPES = Path(__file__).parents[2] / "recipes" / "analysis"
+ANALYSIS_RECIPES = Path(__file__).parents[2] / "studies" / "prefill_convergence" / "recipes"
 
 
 def test_all_paper_recipes_are_strict_and_self_contained() -> None:

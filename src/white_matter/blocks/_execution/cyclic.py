@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
@@ -146,6 +146,7 @@ def forward_cyclic(
     document_ids: torch.Tensor | None = None,
     output_final_state: bool = False,
     kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None,
+    on_pass: Callable[[int, torch.Tensor], None] | None = None,
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
     """Run cyclic passes over strided token groups, refreshing KV after each group.
 
@@ -155,6 +156,8 @@ def forward_cyclic(
     RoPE resets per document. Padding is stably moved to the end and restored
     before returning. Short sequences are padded to fill the cyclic groups.
     """
+    if on_pass is not None and (torch.is_grad_enabled() or attention_mask is not None):
+        raise ValueError("pass observation requires unpadded inference")
     n_iter, num_gradient_passes = resolve_passes(self.num_passes, num_passes, num_gradient_passes)
     if type(cyclic_groups) is not int or cyclic_groups < 1:
         raise ValueError("cyclic_groups must be a positive integer")
@@ -164,11 +167,13 @@ def forward_cyclic(
                                  or x.shape[1] <= cyclic_groups or num_gradient_passes):
         raise ValueError("bounded cyclic prefill requires no gradients, unpadded single-document inputs longer than the group count")
     # One inference schedule, whether storage is temporary or caller-owned.
-    bounded = kv_cache is not None or (x.is_cuda and not self.training and not torch.is_grad_enabled() and not num_gradient_passes)
+    bounded = kv_cache is not None or (x.is_cuda and torch.is_autocast_enabled("cuda")
+                                      and not self.training and not torch.is_grad_enabled() and not num_gradient_passes)
     if bounded and torch.compiler.is_compiling():
         return inference_forward(
             self, x, num_passes=n_iter, num_gradient_passes=num_gradient_passes, cyclic_groups=cyclic_groups,
             attention_mask=attention_mask, document_ids=document_ids, output_final_state=output_final_state, kv_cache=kv_cache,
+            on_pass=on_pass,
         )
     n_passes_no_grad = n_iter - num_gradient_passes
     length = x.shape[1]
@@ -196,7 +201,8 @@ def forward_cyclic(
     T = x.shape[1]
     if bounded and kv_cache is None:
         shape = (x.shape[0], self.num_kv_channels, self.kv_pool.num_key_value_heads, T + 1, self.kv_pool.head_dim)
-        keys = torch.empty(shape, device=x.device, dtype=torch.bfloat16)
+        dtype = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else x.dtype
+        keys = torch.empty(shape, device=x.device, dtype=dtype)
         kv_cache = keys, torch.empty_like(keys)
     q_pos_emb, k_pos_emb = self._prepare_rope(x, document_ids)
     # The explicit batched input preserves backward numerics across the compiled pass boundary.
@@ -251,9 +257,12 @@ def forward_cyclic(
                     x, K, V, dummy_token, *pass_inputs, metadata=metadata,
                     return_hidden_states=detached and last and num_gradient_passes > 0,
                     consume_state=detached, pool_chunk_size=64 if kv_cache is not None else 0,
-                    return_output=last and (not detached or not num_gradient_passes),
+                    return_output=on_pass is not None or (last and (not detached or not num_gradient_passes)),
                     output_final_state=output_final_state and last and (not detached or not num_gradient_passes),
                 )
+                if on_pass is not None:
+                    assert h is not None
+                    on_pass(p + 1, h[:, :length])
 
     assert h is not None
     if restore_perm is not None:

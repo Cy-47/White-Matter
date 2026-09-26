@@ -33,7 +33,8 @@ def source_files() -> dict[str, Path]:
     return {
         **{f'src/white_matter/{p.relative_to(package)}': p for p in sorted(package.rglob('*.py'))},
         **{f'benchmarks/{p.name}': p for p in sorted((root / 'benchmarks').glob('*.py'))},
-        **{f'training/{p.name}': p for p in sorted((root / 'training').glob('*.py'))},
+        **{str(p.relative_to(root)): p for directory in ('training', 'evals', 'studies')
+           for p in sorted((root / directory).rglob('*.py'))},
         'pyproject.toml': root / 'pyproject.toml',
     }
 

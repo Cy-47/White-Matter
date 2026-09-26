@@ -26,12 +26,12 @@ Run both arms on the same cache, read sequentially. See
 [cache requirements](../../docs/reproduction.md) for data preparation.
 
 ```bash
-sbatch studies/rank_20k/slurm/train.sbatch \
-  studies/rank_20k/recipes/k16.yaml \
-  /path/to/fineweb_edu_cache outputs/studies/rank_20k/k16
+sbatch studies/rank/slurm/train.sbatch \
+  studies/rank/recipes/k16.yaml \
+  /path/to/fineweb_edu_cache outputs/studies/rank/k16
 sbatch studies/shared_mixture/slurm/train.sbatch \
-  studies/shared_mixture/recipes/shared_k16_20k.yaml \
-  /path/to/fineweb_edu_cache outputs/studies/shared_mixture/shared_k16_20k
+  studies/shared_mixture/recipes/shared_k16.yaml \
+  /path/to/fineweb_edu_cache outputs/studies/shared_mixture/shared_k16
 ```
 
 For an 8B-token run on eight GPUs, use `--gpus-per-node=8` with
@@ -48,13 +48,13 @@ are not directly comparable.
 
 ```bash
 python -m studies.shared_mixture.evaluate_heldout \
-  --model outputs/studies/rank_20k/k16/final \
+  --model outputs/studies/rank/k16/final \
   --data-dir /path/to/fineweb_edu_cache \
-  --output outputs/studies/rank_20k/k16/heldout_3pass.json
+  --output outputs/studies/rank/k16/heldout_3pass.json
 python -m studies.shared_mixture.evaluate_heldout \
-  --model outputs/studies/shared_mixture/shared_k16_20k/final \
+  --model outputs/studies/shared_mixture/shared_k16/final \
   --data-dir /path/to/fineweb_edu_cache \
-  --output outputs/studies/shared_mixture/shared_k16_20k/heldout_3pass.json
+  --output outputs/studies/shared_mixture/shared_k16/heldout_3pass.json
 ```
 
 The evaluator defaults to batch 16 and compiled CUDA, and writes token-weighted

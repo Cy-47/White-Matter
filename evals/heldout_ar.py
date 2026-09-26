@@ -16,26 +16,14 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
+from evals.execution import score_hidden
+from benchmarks._measurement import checkpoint_files
 from evals.loading import load_complete_model
 from training.data import load_cache_metadata, split_row_indices
 from training.precision import attention_kernel_context
 from white_matter.models import register_models
 from white_matter.modules.precision import model_autocast_context
-
-
-@torch.inference_mode()
-def score_hidden(hidden: torch.Tensor, ids: torch.Tensor, weight: torch.Tensor, chunk_size: int) -> float:
-    """Sum exact next-token CE with a bounded (chunk_size, vocab) workspace."""
-    source = hidden[:, :-1].reshape(-1, hidden.shape[-1])
-    targets = ids[:, 1:].reshape(-1)
-    total = 0.0
-    for start in range(0, targets.numel(), chunk_size):
-        stop = min(start + chunk_size, targets.numel())
-        logits = F.linear(source[start:stop].to(weight.dtype), weight)
-        total += float(F.cross_entropy(logits.float(), targets[start:stop], reduction="sum").item())
-    return total
 
 
 @torch.inference_mode()
@@ -131,6 +119,8 @@ def main() -> None:
         del ids, rows, hidden
 
     result = {
+        "checkpoint": checkpoint_files(str(args.model)),
+        "model_config": model.config.to_dict(),
         "model": str(args.model), "mode": args.mode, "model_type": model.config.model_type,
         "execution": "exact_token_serial_ar" if args.mode == "ar" else "checkpoint_configured",
         "split": "test", "data_dir": str(args.data_dir), "offset": args.offset,

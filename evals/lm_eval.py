@@ -22,19 +22,11 @@ from training.precision import attention_kernel_context
 from white_matter.models import register_models
 from white_matter.modules.precision import model_autocast_context
 
+from evals.paper import PAPER_TASKS
+from benchmarks._measurement import checkpoint_files
+
 register_models()
 
-PAPER_TASKS = [
-    "lambada_openai",
-    "wikitext",
-    "piqa",
-    "winogrande",
-    "boolq",
-    "hellaswag",
-    "arc_easy",
-    "arc_challenge",
-    "openbookqa",
-]
 MAX_EVAL_CONTEXT_TOKENS = 1_024
 
 
@@ -299,8 +291,11 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         configure_eval_compiler()
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    model = load_complete_model(args.model, dtype=dtype).to(device)
+    # The archived harness retains FP32 weights and projects likelihood logits
+    # in FP32; decoder GEMMs use BF16 autocast.
+    model = load_complete_model(args.model, dtype=torch.float32).to(device)
+    if args.prefill_mode is None and model.config.model_type == "white_matter":
+        args.prefill_mode = model.config.execution_mode
     if args.prefill_mode is not None:
         model.config.prefill_mode = args.prefill_mode
     if device.type == "cuda" and not args.no_compile:
@@ -328,6 +323,9 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({
         "model": args.model, "tasks": args.tasks, "limit": args.limit,
+        "checkpoint": checkpoint_files(args.model) if Path(args.model).is_dir() else None,
+        "model_config": model.config.to_dict(),
+        "n_samples": result.get("n-samples", {}),
         "num_fewshot": args.num_fewshot,
         "max_length": harness_model.max_length, "results": result["results"],
         "harness": harness_provenance(),

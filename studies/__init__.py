@@ -1,1 +1,1 @@
-"""Research studies built on the public WhiteMatter components."""
+"""Ablation studies built on the WhiteMatter components."""

@@ -21,6 +21,7 @@ tilelang = ["tilelang==0.1.11", "apache-tvm-ffi==0.1.11"]
 flash-attn = ["flash-attn==2.8.3"]
 gpu = ["white-matter[tilelang,flash-attn]"]
 data = ["datasets>=4,<5"]
+analysis = ["matplotlib>=3.8,<4"]
 benchmarks = ["white-matter[training,gpu]", "nvidia-ml-py>=12,<14"]
 dev = ["pytest>=8,<10", "ruff>=0.12,<1", "build>=1,<2", "mypy>=1.20,<1.21"]
 

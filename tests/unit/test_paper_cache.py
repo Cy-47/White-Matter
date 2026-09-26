@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from studies.paper_20k import validate_paper_cache
+from studies.protocol import validate_paper_cache
 
 
 def _metadata():

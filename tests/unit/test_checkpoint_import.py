@@ -1,4 +1,4 @@
-"""Public checkpoint conversion works with explicit paths and no research checkout."""
+"""Checkpoint conversion preserves model outputs and rejects incomplete weights."""
 
 import pytest
 import torch

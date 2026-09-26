@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from studies.shared_mixture.model import SharedMixtureConfig, register_model
-from studies.paper_20k import (
+from studies.protocol import (
     PAPER_SEQUENCE_LENGTH,
     PAPER_TEST_SEQUENCES,
     PAPER_TEST_TARGETS,
@@ -26,9 +26,9 @@ def validate_checkpoint(config) -> None:
     if config.model_type not in {"white_matter", SharedMixtureConfig.model_type}:
         raise ValueError("three-pass evaluation requires a k=16 control or shared-mixture checkpoint")
     recipe_name, router_prior = (
-        ("shared_mixture_k16_20k", "cyclic:0.25")
+        ("shared_mixture_k16", "cyclic:0.25")
         if config.model_type == SharedMixtureConfig.model_type
-        else ("rank20k_k16", "shifted_identity:0.25")
+        else ("rank_k16", "shifted_identity:0.25")
     )
     expected = {
         "vocab_size": 151_936,
@@ -106,6 +106,8 @@ def main() -> None:
         raise RuntimeError(f"expected {PAPER_TEST_TARGETS} test targets, got {targets}")
     result = {
         "protocol": "matched_k16_three_pass",
+        "model_type": model.config.model_type,
+        "trainable_parameters": model.num_parameters(),
         "checkpoint": str(args.model),
         "split": "test",
         "T": PAPER_SEQUENCE_LENGTH,

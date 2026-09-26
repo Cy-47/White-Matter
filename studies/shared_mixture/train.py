@@ -1,7 +1,7 @@
 """Train a registered shared-mixture study recipe."""
 
 from studies.shared_mixture.model import register_model
-from studies.paper_20k import validate_paper_cache
+from studies.protocol import validate_paper_cache
 
 
 def main() -> None:

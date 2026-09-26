@@ -50,7 +50,7 @@ torchrun --standalone --nproc-per-node=8 -m training.train \
   --data-dir /path/to/data --output-dir outputs/white_matter_k8
 ```
 
-The configurations in [recipes/paper](recipes/paper) cover the reported WhiteMatter models and comparison models. [recipes/analysis](recipes/analysis) contains the exact autoregressive convergence control. Training writes a resume checkpoint and a Hugging Face export for evaluation. The [Slurm examples](slurm/README.md) show cluster launches.
+The configurations in [recipes/paper](recipes/paper) cover the reported WhiteMatter models and comparison models. [The convergence study](studies/prefill_convergence/README.md) contains the exact autoregressive control and its quality/timing workflow. Training writes a resume checkpoint and a Hugging Face export for evaluation. The [Slurm examples](slurm/README.md) show cluster launches.
 
 The [studies index](studies/README.md) contains the Figure 7a schedule matrix,
 Figure 7b rank and connectivity ablations, and the shared-mixture ablation.

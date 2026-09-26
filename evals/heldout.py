@@ -9,43 +9,20 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
-from transformers import PreTrainedModel
 
+from benchmarks._measurement import checkpoint_files
 from evals.loading import load_complete_model
-from evals.scoring import score_tokens
+from evals.execution import evaluate as evaluate_tokens
 from training.data import TokenCacheDataset, load_cache_metadata
-from training.precision import attention_kernel_context
 from white_matter.models import register_models
 from white_matter.modules.precision import model_autocast_context
 
 register_models()
 
 
-@torch.inference_mode()
-def evaluate(
-    model: PreTrainedModel,
-    loader: DataLoader,
-    *,
-    logits_chunk: int = 256,
-) -> tuple[float, int]:
-    if logits_chunk < 1:
-        raise ValueError("logits_chunk must be positive")
-    device = next(model.parameters()).device
-    total_loss = 0.0
-    total_tokens = 0
-    model.eval()
-    for batch in loader:
-        input_ids = batch["input_ids"].to(device, non_blocking=True)
-        with attention_kernel_context(str(device)):
-            with model_autocast_context(str(device)):
-                hidden = model.model(input_ids=input_ids, return_dict=True).last_hidden_state[:, :-1]
-        targets = input_ids[:, 1:].reshape(-1)
-        scores, _ = score_tokens(
-            hidden.reshape(-1, hidden.shape[-1]), model.lm_head.weight, targets, chunk_size=logits_chunk,
-        )
-        total_loss -= float(scores.sum())
-        total_tokens += targets.numel()
-    return total_loss, total_tokens
+def evaluate(model, loader, *, logits_chunk=256):
+    with model_autocast_context(next(model.parameters()).device):
+        return evaluate_tokens(model, loader, chunk_size=logits_chunk)
 
 
 def main() -> None:
@@ -57,8 +34,8 @@ def main() -> None:
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    model = load_complete_model(args.model, dtype=dtype).to(device)
+    # Preserve the paper checkpoint's master weights; GEMMs use BF16 autocast.
+    model = load_complete_model(args.model, dtype=torch.float32).to(device)
     splits = load_cache_metadata(args.data_dir)["splits"]
     dataset = TokenCacheDataset(
         args.data_dir,
@@ -77,6 +54,9 @@ def main() -> None:
     )
     loss_sum, token_count = evaluate(model, loader)
     result = {
+        "model": args.model,
+        "checkpoint": checkpoint_files(args.model) if Path(args.model).is_dir() else None,
+        "model_config": model.config.to_dict(),
         "loss": loss_sum / token_count,
         "perplexity": math.exp(loss_sum / token_count),
         "tokens": token_count,

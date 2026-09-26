@@ -6,8 +6,9 @@ before loading recipes or checkpoints.
 
 | Study | Paper question | Training runs |
 | --- | --- | ---: |
-| [`rank_20k`](rank_20k/README.md) | Figure 7b rank, static routing, and depth-causal connectivity | 9 rank/baseline arms and 1 depth-causal arm |
-| [`schedules_20k`](schedules_20k/README.md) | Figure 7a iteration schedules | 24 cells × 2 seeds |
+| [`prefill_convergence`](prefill_convergence/README.md) | Figure 5 exact-AR control and time to convergence | 1 control |
+| [`rank`](rank/README.md) | Figure 7b rank, static routing, and depth-causal connectivity | 9 rank/baseline arms and 1 depth-causal arm |
+| [`schedules`](schedules/README.md) | Figure 7a iteration schedules | 24 cells × 2 seeds |
 | [`shared_mixture`](shared_mixture/README.md) | One source mixture projected into 16 KV pairs | shared arm and matched k16 control |
 
 Study outputs belong in `outputs/studies/<study>/<arm>/`, which is ignored by

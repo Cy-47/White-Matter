@@ -23,6 +23,7 @@ slurm-*.out
 slurm-*.err
 *.log
 wandb/
+/scratch/
 
 # Compiler caches
 .torch/
@@ -50,6 +51,8 @@ optimizer*.bin
 .DS_Store
 
 # Local credentials and machine-specific settings
+AGENTS.md
+.codex/
 .env
 .env.*
 !.env.example

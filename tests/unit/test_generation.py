@@ -96,8 +96,7 @@ def test_exact_ar_continuation_matches_full_reference(device, surrounding, k, re
     actual = torch.cat(outputs, dim=1)
     if device == "cuda" and residual_dtype == "bf16" and surrounding:
         # Ordinary pre/post layers change GEMM/attention shapes across calls.
-        # The diagnosed BF16 case has max error .00754 and relative L2 .00718;
-        # full-call caching is exact, and the FP32 test below checks the algorithm.
+        # Bound BF16 rounding separately; full-call caching must remain exact.
         delta = actual.float() - expected.float()
         assert delta.abs().max() < 0.01
         assert delta.norm() / expected.float().norm() < 0.01

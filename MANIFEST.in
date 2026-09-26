@@ -15,10 +15,13 @@ prune data
 prune artifacts
 prune checkpoints
 prune logs
+prune scratch
+prune cache
+prune .codex
 include slurm_logs/.gitkeep
 prune .venv
 prune .git
 prune .pytest_cache
 prune .mypy_cache
 prune .ruff_cache
-global-exclude *.py[cod] *.log *.out *.err *.pt *.pth *.safetensors *.npy *.npz .env .env.*
+global-exclude AGENTS.md *.py[cod] *.log *.out *.err *.pt *.pth *.ckpt *.safetensors *.npy *.npz .env .env.* *.pem *.key *.p12
