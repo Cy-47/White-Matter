@@ -2,7 +2,7 @@
 
 Implementation of [WhiteMatter: All-to-All Cross-Layer Connections via KV Source Mixing](https://arxiv.org/abs/2608.18486). WhiteMatter lets each Transformer layer attend to a learned mixture of past-token states from every depth. Multiple layers can share a KV channel, reducing cache size. Cyclic iteration makes the feedback connections parallelizable during training and prefill.
 
-This repository provides the WhiteMatter model, its cyclic attention operator, training and evaluation commands, and the configurations used for the paper. Vanilla, LCKV, and FusedKV implementations are included as comparison models. The paper reports lower held-out perplexity with half the KV cache at both evaluated scales; iterative prefill costs more than standard Transformer prefill.
+This repository provides the WhiteMatter model, its cyclic attention operator, training and evaluation commands, and the configurations used for the paper. Vanilla, LCKV, and FusedKV implementations are included as comparison models.
 
 ## Installation
 
