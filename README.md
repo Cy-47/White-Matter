@@ -37,7 +37,7 @@ from white_matter.ops import cyclic_attention
 output = cyclic_attention(query, key, value, query_stride=4)
 ```
 
-Q/K/V have shape `(batch, heads, sequence, head_dim)`. The portable PyTorch backend is the default; the optional TileLang backend requires a compatible CUDA installation. See the [operator example](examples/cyclic_attention.py) for packed-document metadata and gradients.
+Q/K/V have shape `(batch, heads, sequence, head_dim)`. The portable PyTorch backend is the default; the optional TileLang backend requires a compatible CUDA installation. See the [operator guide](docs/cyclic_attention.md) for the shape and masking contract, backend behavior, and contribution boundaries, and the [operator example](examples/cyclic_attention.py) for packed-document metadata and gradients.
 
 ## Reproduce the experiments
 

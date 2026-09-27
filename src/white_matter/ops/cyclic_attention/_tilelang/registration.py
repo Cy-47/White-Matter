@@ -11,7 +11,7 @@ import torch
 _TILE_TUNING_BY_CC = {
     (8, 6): {  # A6000 / sm_86, 99 KiB shared-memory limit
         # D:   {kernel: (block_M, block_N, num_stages)}
-        128: {"fwd": (64, 32, 2), "dq": (64, 32, 2), "dkv": (64, 32, 1)},
+        128: {"fwd": (64, 64, 2), "doc_fwd": (64, 32, 2), "dq": (64, 32, 2), "dkv": (64, 32, 1)},
         # D=96 needs block_N=32 to fit the shared-memory limit.
         96: {"fwd": (64, 32, 2), "dq": (64, 32, 1), "dkv": (32, 32, 1)},
     },
@@ -23,33 +23,23 @@ _TILE_TUNING_BY_CC = {
     },
 }
 _FALLBACK_CC = (8, 6)
-_TUNING_CACHE: dict = {}
 
 
-def _tuning_for_device():
-    """Tile table for the running GPU's compute capability (cached). Falls back
-    to the A6000 entry for any capability without its own measured table."""
-    cc = _TUNING_CACHE.get("cc")
-    if cc is None:
-        try:
-            cc = torch.cuda.get_device_capability()
-        except Exception:
-            cc = _FALLBACK_CC
-        _TUNING_CACHE["cc"] = cc
-    return _TILE_TUNING_BY_CC.get(cc, _TILE_TUNING_BY_CC[_FALLBACK_CC])
+@functools.cache
+def _device_capability(device_index: int) -> tuple[int, int]:
+    return torch.cuda.get_device_capability(device_index)
 
 
-def _kernel_tile_sizes(D: int, requested_block_M: int, kernel: str):
-    """(block_M, block_N, num_stages) for a cyclic ``kernel`` ('fwd'|'dq'|'dkv').
-
-    The table is selected per device capability (see
-    ``_tuning_for_device``). For a head-dim not in the table we fall back to the
-    caller's ``requested_block_M`` — e.g. the D=64 smoke test.
-    """
-    tune = _tuning_for_device().get(D)
+def _kernel_tile_sizes(D: int, requested_block_M: int, kernel: str, capability: tuple[int, int]):
+    """Resolve measured tiles before caching a compiled specialization."""
+    if kernel in {"doc_dq", "doc_dkv"}:
+        return 32, 32, 1
+    table = _TILE_TUNING_BY_CC.get(capability, _TILE_TUNING_BY_CC[_FALLBACK_CC])
+    tune = table.get(D)
     if tune is None:
         return requested_block_M, 64, 2
-    return tune[kernel]
+    block_M, block_N, stages = tune[kernel if kernel in tune else kernel.removeprefix("doc_")]
+    return block_M, block_N, min(stages, 2) if kernel == "dkv" else stages
 
 
 _RUNTIME_RESIDUE_BUFFERS: dict[tuple[str, int], tuple[torch.Tensor, ...]] = {}
@@ -76,11 +66,12 @@ def _runtime_residue_buffer(device: torch.device, K_stride: int, residue: int) -
 
 
 @functools.lru_cache(maxsize=768)
-def _get_kernel(kind, B, T_kv, HQ, HKV, D, Q_LEN, K_stride, block_M, key_strides=None, value_strides=None):
-    """Compile each shape/tile specialization once; residues stay runtime inputs."""
+def _get_kernel(kind, HQ, HKV, D, K_stride, tiles, capability):
+    """Compile structural variants; dimensions and outer KV strides stay runtime."""
     from importlib import import_module
 
     import tilelang
+    import tilelang.language as T
 
     module_name = {
         "fwd": "forward",
@@ -90,13 +81,16 @@ def _get_kernel(kind, B, T_kv, HQ, HKV, D, Q_LEN, K_stride, block_M, key_strides
         "doc_dq": "document_backward_query",
         "doc_dkv": "document_backward_key_value",
     }[kind]
-    if kind in {"doc_dq", "doc_dkv"}:
-        block_M, block_N, stages = 32, 32, 1
-    else:
-        block_M, block_N, stages = _kernel_tile_sizes(D, block_M, kind.removeprefix("doc_"))
-    # Variable-trip-count dKV pipelines over-read with more than two stages.
-    if kind.endswith("dkv"):
-        stages = min(stages, 2)
+    block_M, block_N, stages = tiles
+    B, T_kv, Q_LEN = (T.dynamic(name) for name in ("batch", "kv_length", "query_length"))
+    strides = {}
+    if kind == "fwd":
+        # Infer outer strides from each tensor, including padded cache capacity.
+        # Storage normalization guarantees unit element stride and vector alignment.
+        strides = {
+            "key_strides": (*[T.dynamic(f"key_stride_{i}", "int64") for i in range(3)], 1),
+            "value_strides": (*[T.dynamic(f"value_stride_{i}", "int64") for i in range(3)], 1),
+        }
     program = import_module(f"{__package__}.{module_name}").build_program(
         B,
         T_kv,
@@ -109,13 +103,21 @@ def _get_kernel(kind, B, T_kv, HQ, HKV, D, Q_LEN, K_stride, block_M, key_strides
         block_N,
         stages,
         128,
-        **({"key_strides": key_strides, "value_strides": value_strides} if kind == "fwd" else {}),
+        **strides,
     )
     return tilelang.compile(
         program,
-        target="cuda",
+        target={"kind": "cuda", "arch": f"sm_{capability[0]}{capability[1]}"},
         pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
     )
+
+
+def _kernel_for(kind, Q, K, V, K_stride, block_M):
+    capability = _device_capability(Q.device.index)
+    tiles = _kernel_tile_sizes(Q.shape[-1], block_M, kind, capability)
+    # Q is BHQD here; all runtime dimensions are excluded from the cache key.
+    with torch.cuda.device(Q.device):
+        return _get_kernel(kind, Q.shape[1], K.shape[1], Q.shape[-1], K_stride, tiles, capability)
 
 
 def _forward_impl(Q, K, V, metadata, K_stride, residue, block_M):
@@ -123,16 +125,17 @@ def _forward_impl(Q, K, V, metadata, K_stride, residue, block_M):
     B, HQ, Q_LEN, D = Q.shape
     # Projections produce/consume BQHD. Keep that storage across attention;
     # the public operator still exposes BHQD views, including to autograd.
-    Q = Q.transpose(1, 2).contiguous()
+    query = Q
+    Q = _contiguous_in_dtype(Q.transpose(1, 2), Q.dtype)
     # Plain prefill reads native cache views directly, including capacity padding
-    # and channel strides. Document kernels retain their contiguous contract.
-    K, V = (x.to(Q.dtype) if metadata is None else _contiguous_in_dtype(x, Q.dtype) for x in (K, V))
+    # and channel selection. Unaligned layouts are normalized before dispatch.
+    normalize = _normalize_native_kv if metadata is None else _contiguous_in_dtype
+    K, V = (normalize(x, Q.dtype) for x in (K, V))
     output = torch.empty_like(Q)
     lse = torch.empty((B, HQ, Q_LEN), dtype=torch.float32, device=Q.device)
-    segments = () if QSeg is None else tuple(_contiguous_in_dtype(x, torch.int32) for x in (QSeg, KSeg))
+    segments = () if QSeg is None else tuple(_contiguous_in_dtype(x, torch.int32) for x in (QSeg, KSeg, QStart))
     kind = "doc_fwd" if segments else "fwd"
-    strides = (tuple(K.stride()), tuple(V.stride())) if metadata is None else ()
-    kernel = _get_kernel(kind, B, K.shape[2], HQ, K.shape[1], D, Q_LEN, K_stride, block_M, *strides)
+    kernel = _kernel_for(kind, query, K, V, K_stride, block_M)
     kernel(Q, K, V, *segments, _runtime_residue_buffer(Q.device, K_stride, residue), output, lse)
     return output.transpose(1, 2), lse
 
@@ -150,11 +153,9 @@ def _backward_impl(Q, K, V, metadata, Out, Lse, dOut, K_stride, residue, block_M
     if QSeg is not None:
         QSeg, KSeg, QStart, KQEnd = (_contiguous_in_dtype(x, torch.int32) for x in (QSeg, KSeg, QStart, KQEnd))
         segments = (QSeg, KSeg)
-    B, HQ, Q_LEN, D = Q.shape
-    shape = (B, K.shape[2], HQ, K.shape[1], D, Q_LEN, K_stride, block_M)
     residue_buffer = _runtime_residue_buffer(Q.device, K_stride, residue)
     for kind, bound, outputs in (("dq", QStart, (dQ,)), ("dkv", KQEnd, (dK, dV))):
-        kernel = _get_kernel("doc_" + kind if segments else kind, *shape)
+        kernel = _kernel_for("doc_" + kind if segments else kind, Q, K, V, K_stride, block_M)
         metadata = (*segments, bound) if segments else ()
         kernel(Q, K, V, dOut, D_pre, Lse, *metadata, residue_buffer, *outputs)
     return dQ, dK, dV
@@ -231,8 +232,17 @@ cyclic_attn_fwd.register_autograd(_backward, setup_context=_setup_ctx)
 # the globally visible dummy. Ragged metadata loads are clamped in the kernels.
 
 
+def _normalize_native_kv(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """Retain aligned cache views; normalize layouts unsafe for vector loads."""
+    if x.dtype != dtype:
+        x = x.to(dtype)
+    if x.stride(-1) == 1 and x.data_ptr() % 16 == 0 and all(stride % 8 == 0 for stride in x.stride()[:3]):
+        return x
+    return x.clone(memory_format=torch.contiguous_format)
+
+
 def _contiguous_in_dtype(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-    """Return ``x`` contiguous/in ``dtype`` without dispatching no-op aten ops.
+    """Return contiguous, 16-byte-aligned storage in ``dtype``.
 
     The document-masked training path invokes these custom ops more than a
     thousand times per step. Production Q/K/V and the hoisted segment buffers
@@ -245,7 +255,7 @@ def _contiguous_in_dtype(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         x = x.contiguous()
     if x.dtype != dtype:
         x = x.to(dtype)
-    return x
+    return x if x.data_ptr() % 16 == 0 else x.clone()
 
 
 @torch.library.custom_op("white_matter::cyclic_attn_doc_fwd", mutates_args=())

@@ -77,71 +77,77 @@ def build_program(
             )
             i_blk_end = T.min(n_q_blocks, T.ceildiv(q_end, block_M))
 
-            for g in T.serial(groups):
-                hq = by * groups + g
-                for ib in T.Pipelined(i_blk_start, i_blk_end, num_stages=num_stages):
-                    T.copy(
-                        Q[bz, hq, ib * block_M : (ib + 1) * block_M, :],
-                        q_shared,
-                    )
-                    T.copy(
-                        dO[bz, hq, ib * block_M : (ib + 1) * block_M, :],
-                        do_shared,
-                    )
-                    for i in T.Parallel(block_M):
-                        d_row[i] = D_pre[bz, hq, ib * block_M + i]
-                        l_row[i] = Lse[bz, hq, ib * block_M + i] * 1.44269504
-                        q_seg[i] = QSeg[bz, T.min(ib * block_M + i, q_len - 1)]
-
-                    T.fill(acc_s, 0.0)
-                    T.gemm(
-                        q_shared,
-                        k_shared,
-                        acc_s,
-                        transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullRow,
-                    )
-                    for i, j in T.Parallel(block_M, block_N):
-                        q_actual = residue + (ib * block_M + i) * K_stride
-                        acc_s[i, j] = T.if_then_else(
-                            q_actual >= bx * block_N + j,
-                            T.if_then_else(
-                                q_seg[i] == k_seg[j],
-                                T.exp2(acc_s[i, j] * scale_log2 - l_row[i]),
-                                T.if_then_else(
-                                    k_seg[j] == -1,
-                                    T.exp2(acc_s[i, j] * scale_log2 - l_row[i]),
-                                    0.0,
-                                ),
-                            ),
-                            0.0,
+            # Slabs invisible to every real query retain their zero accumulators.
+            if bx * block_N <= residue + (q_len - 1) * K_stride:
+                for g in T.serial(groups):
+                    hq = by * groups + g
+                    for ib in T.Pipelined(i_blk_start, i_blk_end, num_stages=num_stages):
+                        T.copy(
+                            Q[bz, hq, ib * block_M : (ib + 1) * block_M, :],
+                            q_shared,
                         )
-                    T.copy(acc_s, p_shared)
-                    T.gemm(
-                        p_shared,
-                        do_shared,
-                        acc_dv,
-                        transpose_A=True,
-                        policy=T.GemmWarpPolicy.FullRow,
-                    )
-                    T.fill(acc_dp, 0.0)
-                    T.gemm(
-                        do_shared,
-                        v_shared,
-                        acc_dp,
-                        transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullRow,
-                    )
-                    for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] *= acc_dp[i, j] - d_row[i]
-                    T.copy(acc_s, ds_shared)
-                    T.gemm(
-                        ds_shared,
-                        q_shared,
-                        acc_dk,
-                        transpose_A=True,
-                        policy=T.GemmWarpPolicy.FullRow,
-                    )
+                        T.copy(
+                            dO[bz, hq, ib * block_M : (ib + 1) * block_M, :],
+                            do_shared,
+                        )
+                        for i in T.Parallel(block_M):
+                            d_row[i] = T.if_then_else(ib * block_M + i < q_len, D_pre[bz, hq, ib * block_M + i], 0.0)
+                            l_row[i] = T.if_then_else(
+                                ib * block_M + i < q_len, Lse[bz, hq, ib * block_M + i] * 1.44269504, 0.0
+                            )
+                            q_seg[i] = QSeg[bz, T.min(ib * block_M + i, q_len - 1)]
+
+                        T.fill(acc_s, 0.0)
+                        T.gemm(
+                            q_shared,
+                            k_shared,
+                            acc_s,
+                            transpose_B=True,
+                            policy=T.GemmWarpPolicy.FullRow,
+                        )
+                        for i, j in T.Parallel(block_M, block_N):
+                            q_actual = residue + (ib * block_M + i) * K_stride
+                            acc_s[i, j] = T.if_then_else(
+                                (ib * block_M + i < q_len)
+                                and (bx * block_N + j < T_kv)
+                                and (q_actual >= bx * block_N + j),
+                                T.if_then_else(
+                                    q_seg[i] == k_seg[j],
+                                    T.exp2(acc_s[i, j] * scale_log2 - l_row[i]),
+                                    T.if_then_else(
+                                        k_seg[j] == -1,
+                                        T.exp2(acc_s[i, j] * scale_log2 - l_row[i]),
+                                        0.0,
+                                    ),
+                                ),
+                                0.0,
+                            )
+                        T.copy(acc_s, p_shared)
+                        T.gemm(
+                            p_shared,
+                            do_shared,
+                            acc_dv,
+                            transpose_A=True,
+                            policy=T.GemmWarpPolicy.FullRow,
+                        )
+                        T.fill(acc_dp, 0.0)
+                        T.gemm(
+                            do_shared,
+                            v_shared,
+                            acc_dp,
+                            transpose_B=True,
+                            policy=T.GemmWarpPolicy.FullRow,
+                        )
+                        for i, j in T.Parallel(block_M, block_N):
+                            acc_s[i, j] *= acc_dp[i, j] - d_row[i]
+                        T.copy(acc_s, ds_shared)
+                        T.gemm(
+                            ds_shared,
+                            q_shared,
+                            acc_dk,
+                            transpose_A=True,
+                            policy=T.GemmWarpPolicy.FullRow,
+                        )
 
             for j, d in T.Parallel(block_N, D):
                 acc_dk[j, d] *= inv_sqrt_d

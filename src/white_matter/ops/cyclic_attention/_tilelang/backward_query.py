@@ -65,13 +65,13 @@ def build_program(
             # saves block_M×D×2B shmem per CTA (no O_shared), which frees
             # budget to grow tiles at d=128.
             for i in T.Parallel(block_M):
-                D_row[i] = D_pre[bz, by, bx * block_M + i]
-                L_row[i] = Lse[bz, by, bx * block_M + i] * _LOG2E
+                D_row[i] = T.if_then_else(bx * block_M + i < Q_LEN, D_pre[bz, by, bx * block_M + i], 0.0)
+                L_row[i] = T.if_then_else(bx * block_M + i < Q_LEN, Lse[bz, by, bx * block_M + i] * _LOG2E, 0.0)
 
             T.fill(acc_dq, 0.0)
 
             residue = Residue[0]
-            q_actual_max = residue + ((bx + 1) * block_M - 1) * K_stride
+            q_actual_max = residue + T.min((bx + 1) * block_M - 1, Q_LEN - 1) * K_stride
             loop_range = T.min(
                 T.ceildiv(T_kv, block_N),
                 T.ceildiv(q_actual_max + 1, block_N),
@@ -88,7 +88,7 @@ def build_program(
                 for i, j in T.Parallel(block_M, block_N):
                     q_actual = residue + (bx * block_M + i) * K_stride
                     acc_s[i, j] = T.if_then_else(
-                        q_actual >= k * block_N + j,
+                        (bx * block_M + i < Q_LEN) and (k * block_N + j < T_kv) and (q_actual >= k * block_N + j),
                         T.exp2(acc_s[i, j] * scale_log2 - L_row[i]),
                         0.0,
                     )

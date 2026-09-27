@@ -38,5 +38,5 @@ def cyclic_attention_reference(
             is_causal=False,
             scale=query.shape[-1] ** -0.5,
             dropout_p=0.0,
-            enable_gqa=query.shape[1] != key.shape[1],
+            enable_gqa=True,
         )

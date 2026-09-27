@@ -62,3 +62,42 @@ def test_invalid_backend_and_metadata_fail_explicitly():
         cyclic_attention(q, q, q, query_offset=-1)
     with pytest.raises(ValueError, match="dummy"):
         prepare_cyclic_attention_metadata(torch.zeros(1, 3, dtype=torch.long), torch.zeros(1, 3, dtype=torch.long))
+
+
+@pytest.mark.parametrize("overflow_input", ["query", "key"])
+def test_document_metadata_rejects_ids_exceeding_int32(overflow_input):
+    query_ids = torch.tensor([[0]], dtype=torch.int64)
+    key_ids = torch.tensor([[-1, 0]], dtype=torch.int64)
+    ids = query_ids if overflow_input == "query" else key_ids
+    ids[:, -1] = torch.iinfo(torch.int32).max + 1
+    with pytest.raises(ValueError, match="segment IDs must fit int32"):
+        prepare_cyclic_attention_metadata(query_ids, key_ids)
+
+
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_document_metadata_accepts_maximum_int32_id(dtype):
+    maximum = torch.iinfo(torch.int32).max
+    metadata = prepare_cyclic_attention_metadata(
+        torch.tensor([[0, maximum]], dtype=dtype),
+        torch.tensor([[-1, 0, maximum]], dtype=dtype),
+    )
+    expected = ([[0, maximum]], [[-1, 0, maximum]], [[1, 2]], [[2, 1, 2]])
+    for actual, values in zip(metadata, expected, strict=True):
+        torch.testing.assert_close(actual, torch.tensor(values, dtype=torch.int32))
+
+
+@pytest.mark.parametrize("gqa_ratio", [1, 2])
+def test_reference_supports_compiled_dynamic_shapes(gqa_ratio):
+    attention = torch.compile(cyclic_attention, backend="eager", fullgraph=True, dynamic=True)
+    for batch, qlen, kvlen in ((2, 3, 11), (3, 5, 19)):
+        q = torch.randn(batch, 2 * gqa_ratio, qlen, 8, requires_grad=True)
+        k = torch.randn(batch, 2, kvlen, 8, requires_grad=True)
+        v = torch.randn_like(k, requires_grad=True)
+        expected = cyclic_attention(q, k, v, query_stride=2)
+        actual = attention(q, k, v, query_stride=2)
+        probe = torch.randn_like(q)
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual, (q, k, v), probe),
+            torch.autograd.grad(expected, (q, k, v), probe),
+        )

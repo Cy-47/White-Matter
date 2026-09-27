@@ -57,13 +57,13 @@ def build_program(
             T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], q_shared)
             T.copy(dO[bz, by, bx * block_M : (bx + 1) * block_M, :], do_shared)
             for i in T.Parallel(block_M):
-                d_row[i] = D_pre[bz, by, bx * block_M + i]
-                l_row[i] = Lse[bz, by, bx * block_M + i] * 1.44269504
+                d_row[i] = T.if_then_else(bx * block_M + i < q_len, D_pre[bz, by, bx * block_M + i], 0.0)
+                l_row[i] = T.if_then_else(bx * block_M + i < q_len, Lse[bz, by, bx * block_M + i] * 1.44269504, 0.0)
                 q_seg[i] = QSeg[bz, T.min(bx * block_M + i, q_len - 1)]
             T.fill(acc_dq, 0.0)
 
             residue = Residue[0]
-            q_actual_max = residue + ((bx + 1) * block_M - 1) * K_stride
+            q_actual_max = residue + T.min((bx + 1) * block_M - 1, q_len - 1) * K_stride
             dense_end = T.min(
                 T.ceildiv(T_kv, block_N),
                 T.ceildiv(q_actual_max + 1, block_N),
@@ -95,7 +95,7 @@ def build_program(
                 for i, j in T.Parallel(block_M, block_N):
                     q_actual = residue + (bx * block_M + i) * K_stride
                     acc_s[i, j] = T.if_then_else(
-                        q_actual >= k * block_N + j,
+                        (bx * block_M + i < q_len) and (k * block_N + j < T_kv) and (q_actual >= k * block_N + j),
                         T.if_then_else(
                             q_seg[i] == k_seg[j],
                             T.exp2(acc_s[i, j] * scale_log2 - l_row[i]),

@@ -102,3 +102,21 @@ python -m benchmarks.cyclic_attention --backend tilelang --device cuda --documen
 ```
 
 Profiles do not contribute throughput results. Training writes one Chrome trace per rank.
+
+## Cyclic attention operator
+
+```bash
+python -m benchmarks.cyclic_attention --backend tilelang --device cuda --length 2048 \
+  --batch-size 2 --head-dim 96 --kv-heads 3 --gqa-ratio 2 --stride 8 --documents
+python -m benchmarks.cyclic_attention --backend tilelang --device cuda --length 2048 \
+  --cache-padding 256
+```
+
+The operator benchmark records first-call wall time separately from warmed forward/backward
+latency. First-call time includes PyTorch compilation and TileLang compilation or disk-cache
+loading; it is not an isolated compiler measurement. `kernel_cache` records Python kernel
+cache counters before the first call, after it, and after warm measurements. A cache miss can
+still load a compiled kernel from disk. `--cache-padding` exercises native views with unused
+K/V capacity; `--batch-size`, `--head-dim`, `--kv-heads`, and `--gqa-ratio` select the workload.
+Each CLI invocation starts a new process, so use the GPU shape-reuse regression test to check
+reuse across different shapes within one process.

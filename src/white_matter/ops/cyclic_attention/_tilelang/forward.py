@@ -46,6 +46,13 @@ def build_program(
         Output: T.Tensor(q_shape, _TL_DTYPE),
         Lse: T.Tensor(lse_shape, _LSE_DTYPE),
     ):
+        # Dispatch verifies pointer and row alignment before enabling vector copies.
+        T.assume(key_strides[0] % 8 == 0)
+        T.assume(key_strides[1] % 8 == 0)
+        T.assume(key_strides[2] % 8 == 0)
+        T.assume(value_strides[0] % 8 == 0)
+        T.assume(value_strides[1] % 8 == 0)
+        T.assume(value_strides[2] % 8 == 0)
         with T.Kernel(T.ceildiv(Q_LEN * groups, block_M), HKV, B, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, D], _TL_DTYPE)
             K_shared = T.alloc_shared([block_N, D], _TL_DTYPE)
@@ -62,13 +69,17 @@ def build_program(
 
             # Pack query heads sharing a KV head into the same attention tile.
             for i, d in T.Parallel(block_M, D):
-                Q_shared[i, d] = Q[bz, (bx * block_M + i) // groups, by * groups + (bx * block_M + i) % groups, d]
+                Q_shared[i, d] = T.if_then_else(
+                    (bx * block_M + i) // groups < Q_LEN,
+                    Q[bz, (bx * block_M + i) // groups, by * groups + (bx * block_M + i) % groups, d],
+                    0.0,
+                )
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(_ACCUM_DTYPE))
 
             residue = Residue[0]
-            q_actual_max = residue + (((bx + 1) * block_M - 1) // groups) * K_stride
+            q_actual_max = residue + T.min(((bx + 1) * block_M - 1) // groups, Q_LEN - 1) * K_stride
             loop_range = T.min(
                 T.ceildiv(T_kv, block_N),
                 T.ceildiv(q_actual_max + 1, block_N),
@@ -79,7 +90,7 @@ def build_program(
                 for i, j in T.Parallel(block_M, block_N):
                     q_actual = residue + ((bx * block_M + i) // groups) * K_stride
                     acc_s[i, j] = T.if_then_else(
-                        q_actual >= k * block_N + j,
+                        (k * block_N + j < T_kv) and (q_actual >= k * block_N + j),
                         0,
                         -T.infinity(acc_s.dtype),
                     )
@@ -107,12 +118,16 @@ def build_program(
                 acc_o[i, j] /= logsum[i]
             T.copy(acc_o, O_shared)
             for i, d in T.Parallel(block_M, D):
-                Output[bz, (bx * block_M + i) // groups, by * groups + (bx * block_M + i) % groups, d] = O_shared[i, d]
+                if (bx * block_M + i) // groups < Q_LEN:
+                    Output[bz, (bx * block_M + i) // groups, by * groups + (bx * block_M + i) % groups, d] = O_shared[
+                        i, d
+                    ]
 
             # Natural-log LSE for backward probability reconstruction.
             for i in T.Parallel(block_M):
-                Lse[bz, by * groups + (bx * block_M + i) % groups, (bx * block_M + i) // groups] = scores_max[
-                    i
-                ] * inv_sqrt_d + T.log(logsum[i])
+                if (bx * block_M + i) // groups < Q_LEN:
+                    Lse[bz, by * groups + (bx * block_M + i) % groups, (bx * block_M + i) // groups] = scores_max[
+                        i
+                    ] * inv_sqrt_d + T.log(logsum[i])
 
     return main
