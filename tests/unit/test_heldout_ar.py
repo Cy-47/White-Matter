@@ -12,21 +12,40 @@ from white_matter.models import register_models
 
 @pytest.mark.parametrize("family", ["white_matter", "lckv"])
 @pytest.mark.parametrize("separator", [None, 30])
-@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=[
-    pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA"),
-])])
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=[
+                pytest.mark.gpu,
+                pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA"),
+            ],
+        ),
+    ],
+)
 @torch.inference_mode()
 def test_ar_evaluation_matches_complete_model(family, separator, device):
     register_models()
     torch.manual_seed(71)
     options = {"num_kv_channels": 1} if family == "white_matter" else {}
     config = AutoConfig.for_model(
-        family, vocab_size=31, eos_token_id=30, document_separator_token_id=separator,
+        family,
+        vocab_size=31,
+        eos_token_id=30,
+        document_separator_token_id=separator,
         hidden_size=128 if device == "cuda" else 16,
-        intermediate_size=256 if device == "cuda" else 32, num_hidden_layers=4,
-        num_pre_layers=1, num_post_layers=1, num_attention_heads=2,
-        num_key_value_heads=1, head_dim=64 if device == "cuda" else 8,
-        num_passes=1, residual_dtype="bf16", **options,
+        intermediate_size=256 if device == "cuda" else 32,
+        num_hidden_layers=4,
+        num_pre_layers=1,
+        num_post_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=64 if device == "cuda" else 8,
+        num_passes=1,
+        residual_dtype="bf16",
+        **options,
     )
     config._attn_implementation = "sdpa"
     model = AutoModelForCausalLM.from_config(config).to(device).eval()
@@ -39,7 +58,8 @@ def test_ar_evaluation_matches_complete_model(family, separator, device):
         torch.testing.assert_close(forward_hidden(model, ids, "ar"), expected)
     assert model.config.to_dict() == original_config
     torch.testing.assert_close(
-        forward_hidden(model, ids, "configured"), model.model(ids, use_cache=False).last_hidden_state,
+        forward_hidden(model, ids, "configured"),
+        model.model(ids, use_cache=False).last_hidden_state,
     )
 
 

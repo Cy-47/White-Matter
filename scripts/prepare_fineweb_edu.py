@@ -16,7 +16,6 @@ from pathlib import Path
 from queue import Empty
 
 import numpy as np
-
 from _packing import Packer
 
 DEFAULT_DATASET = "karpathy/fineweb-edu-100b-shuffle"
@@ -35,7 +34,7 @@ def worker(
     n_target: int,
     row_offset: int,
     tok_path: str,
-    q: "Queue",
+    q: Queue,
 ):
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
     from datasets import load_dataset
@@ -68,7 +67,7 @@ def worker(
             docs_seen += 1
             packer.add_doc(ids)
         # Each tokenizer batch already yields a contiguous block of packed rows.
-        rows = packer.take_rows()[:n_target - written]
+        rows = packer.take_rows()[: n_target - written]
         out[row_offset + written : row_offset + written + len(rows)] = rows
         written += len(rows)
         now = time.time()
@@ -149,26 +148,26 @@ def main():
     mm = np.lib.format.open_memmap(tok_path, mode="w+", dtype=np.int32, shape=(n_total, SEQUENCE_LENGTH))
     del mm  # workers reopen in r+ mode
 
-    q: "Queue" = Queue()
+    q: Queue = Queue()
     procs = []
     t0 = time.time()
     for i in range(W):
         p = Process(
             target=worker,
-            kwargs=dict(
-                worker_id=i,
-                num_workers=W,
-                n_target=per_worker[i],
-                row_offset=offsets[i],
-                tok_path=str(tok_path),
-                q=q,
-            ),
+            kwargs={
+                "worker_id": i,
+                "num_workers": W,
+                "n_target": per_worker[i],
+                "row_offset": offsets[i],
+                "tok_path": str(tok_path),
+                "q": q,
+            },
             daemon=False,
         )
         p.start()
         procs.append(p)
 
-    progress = {i: 0 for i in range(W)}
+    progress = dict.fromkeys(range(W), 0)
     while any(progress[i] < target for i, target in enumerate(per_worker)):
         try:
             wid, n_done, elapsed = q.get(timeout=30)
@@ -181,11 +180,11 @@ def main():
                 for p in procs:
                     p.join()
                 details = ", ".join(f"pid={p.pid} exitcode={p.exitcode}" for p in failed)
-                raise RuntimeError(f"cache-build worker failed: {details}")
+                raise RuntimeError(f"cache-build worker failed: {details}") from None
             if all(p.exitcode is not None for p in procs):
                 raise RuntimeError(
                     f"all cache-build workers exited before completion messages were received; progress={progress}"
-                )
+                ) from None
             agg = sum(progress.values())
             rate = agg / max(time.time() - t0, 1e-9)
             eta = (n_total - agg) / max(rate, 1e-9)

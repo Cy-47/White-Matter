@@ -27,7 +27,8 @@ def test_resume_reproduces_next_update_and_all_rng_streams(tmp_path):
         num_attention_heads=4,
         num_key_value_heads=2,
         head_dim=8,
-        eos_token_id=100, document_separator_token_id=100,
+        eos_token_id=100,
+        document_separator_token_id=100,
         num_kv_channels=2,
         cyclic_groups=2,
         num_passes=3,
@@ -73,7 +74,7 @@ def test_resume_reproduces_next_update_and_all_rng_streams(tmp_path):
         training_config_sha256="config",
         training_source_sha256="source",
     )
-    draws = (rng.random(), np.random.random(), random.random())
+    draws = (rng.random(), np.random.random(), random.random())  # noqa: NPY002 - test global RNG resume.
     expected_loss = step(model, opts)
     checkpoint = load_training_checkpoint(path)
     assert checkpoint["step"] == 1
@@ -91,7 +92,7 @@ def test_resume_reproduces_next_update_and_all_rng_streams(tmp_path):
     restored_opts.adamw.load_state_dict(checkpoint["opt"])
     restored_opts.muon.load_state_dict(checkpoint["opt_muon"])
     restore_rng_states(checkpoint, rng)
-    assert (rng.random(), np.random.random(), random.random()) == draws
+    assert (rng.random(), np.random.random(), random.random()) == draws  # noqa: NPY002 - test global RNG resume.
     torch.testing.assert_close(step(restored, restored_opts), expected_loss, rtol=0, atol=0)
     for name, parameter in model.named_parameters():
         torch.testing.assert_close(dict(restored.named_parameters())[name], parameter, rtol=0, atol=0)

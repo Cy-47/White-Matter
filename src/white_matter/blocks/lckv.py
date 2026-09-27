@@ -56,9 +56,7 @@ class LCKVBlock(nn.Module):
         k_pos_emb: tuple[torch.Tensor, torch.Tensor],
         document_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        keys, values = self.kv_pool.project_sequence(
-            layer_hidden_states.transpose(1, 2).contiguous(), k_pos_emb
-        )
+        keys, values = self.kv_pool.project_sequence(layer_hidden_states.transpose(1, 2).contiguous(), k_pos_emb)
         hidden, states = run_feedback_layers(
             self.layers, x_in, (keys[:, 0],), (values[:, 0],), q_pos_emb, document_ids=document_ids
         )
@@ -98,8 +96,12 @@ class LCKVBlock(nn.Module):
         # Training retains the full-stack reference, including its gradients.
         if self.training or torch.is_grad_enabled() or num_gradient_passes not in (None, 0):
             return jacobi.forward_jacobi(
-                self, x, num_passes=num_passes, num_gradient_passes=num_gradient_passes,
-                document_ids=document_ids, output_final_state=output_final_state,
+                self,
+                x,
+                num_passes=num_passes,
+                num_gradient_passes=num_gradient_passes,
+                document_ids=document_ids,
+                output_final_state=output_final_state,
             )
         passes, _ = resolve_passes(self.num_passes, num_passes, num_gradient_passes)
         q_pos_emb, k_pos_emb = self._prepare_rope(x, document_ids)

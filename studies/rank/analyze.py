@@ -9,7 +9,6 @@ from pathlib import Path
 
 from studies.protocol import PAPER_TEST_TARGETS
 
-
 BASELINE_ARMS = ("k1", "k2", "k4", "k8", "k12", "k16", "k1_static", "k16_static", "vanilla")
 
 
@@ -27,22 +26,35 @@ def collect(root: Path, *, include_depth_causal: bool = False, shared_mixture: P
             or result.get("n_passes") != expected_passes
         ):
             raise ValueError(f"invalid Figure 7b result: {path}")
-        rows.append({
-            "arm": arm,
-            "n_passes": expected_passes,
-            "perplexity": result["perplexity"],
-            "lm_ce": result["lm_ce"],
-            "trainable_parameters": result["trainable_parameters"],
-            "checkpoint": result["checkpoint"],
-        })
+        rows.append(
+            {
+                "arm": arm,
+                "n_passes": expected_passes,
+                "perplexity": result["perplexity"],
+                "lm_ce": result["lm_ce"],
+                "trainable_parameters": result["trainable_parameters"],
+                "checkpoint": result["checkpoint"],
+            }
+        )
     if shared_mixture is not None:
         result = json.loads(shared_mixture.read_text())
-        if (result.get("protocol") != "matched_k16_three_pass" or result.get("n_tok") != PAPER_TEST_TARGETS
-                or result.get("n_passes") != 3 or result.get("model_type") != "white_matter_shared_mixture"):
+        if (
+            result.get("protocol") != "matched_k16_three_pass"
+            or result.get("n_tok") != PAPER_TEST_TARGETS
+            or result.get("n_passes") != 3
+            or result.get("model_type") != "white_matter_shared_mixture"
+        ):
             raise ValueError(f"invalid shared-mixture result: {shared_mixture}")
-        rows.append(dict(arm="shared_mixture", n_passes=3, perplexity=result["perplexity"],
-                         lm_ce=result["lm_ce"], trainable_parameters=result["trainable_parameters"],
-                         checkpoint=result["checkpoint"]))
+        rows.append(
+            {
+                "arm": "shared_mixture",
+                "n_passes": 3,
+                "perplexity": result["perplexity"],
+                "lm_ce": result["lm_ce"],
+                "trainable_parameters": result["trainable_parameters"],
+                "checkpoint": result["checkpoint"],
+            }
+        )
     return rows
 
 

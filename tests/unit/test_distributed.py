@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 import training.distributed as wm_dist
@@ -52,10 +53,6 @@ def test_gradient_reduce_rejects_rank_dependent_presence(monkeypatch) -> None:
     for parameter in parameters:
         parameter.grad = torch.ones_like(parameter)
 
-    try:
+    with pytest.raises(RuntimeError, match=r"parameter indices \[1\]"):
         all_reduce_grads(parameters, 2, validate_presence=True)
-    except RuntimeError as error:
-        assert "parameter indices [1]" in str(error)
-    else:
-        raise AssertionError("rank-dependent gradients were accepted")
     assert calls == [torch.int32]

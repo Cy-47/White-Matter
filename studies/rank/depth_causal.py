@@ -11,7 +11,9 @@ from white_matter.blocks._execution.metadata import prepare_feedback_metadata
 from white_matter.models.decoder_utils import prepare_attention_inputs, prepare_decoder_inputs, run_feedforward_layers
 from white_matter.models.white_matter.configuration_white_matter import WhiteMatterConfig
 from white_matter.models.white_matter.modeling_white_matter import (
-    WhiteMatterDecoder, WhiteMatterForCausalLM, WhiteMatterModel,
+    WhiteMatterDecoder,
+    WhiteMatterForCausalLM,
+    WhiteMatterModel,
 )
 from white_matter.modules.kv_pool import KVPool
 from white_matter.modules.rotary import rotate_half
@@ -41,10 +43,11 @@ class DepthCausalKVPool(KVPool):
         context = selected.reshape(*selected.shape[:2], router.num_sources * self.hidden_size)
         start = layer * self.num_layers
         logits = F.linear(
-            context, router.linear.weight[start:start + self.num_layers],
-            router.linear.bias[start:start + self.num_layers],
+            context,
+            router.linear.weight[start : start + self.num_layers],
+            router.linear.bias[start : start + self.num_layers],
         )
-        return logits[..., :layer + 1].to(stacked.dtype)
+        return logits[..., : layer + 1].to(stacked.dtype)
 
     def project_causal_basis(
         self,
@@ -93,8 +96,12 @@ class DepthCausalBlock(WhiteMatterBlock):
             sources_v.append(source_v)
             key, value = self.kv_pool.project_causal_basis(sources_k, sources_v, layer_idx, k_pos)
             hidden = layer(
-                hidden, key[..., :-1, :].contiguous(), value[..., :-1, :].contiguous(),
-                q_pos, document_ids=document_ids, metadata=metadata,
+                hidden,
+                key[..., :-1, :].contiguous(),
+                value[..., :-1, :].contiguous(),
+                q_pos,
+                document_ids=document_ids,
+                metadata=metadata,
             )
         return hidden
 
@@ -124,10 +131,17 @@ class DepthCausalDecoder(WhiteMatterDecoder):
     block_class = DepthCausalBlock
 
     def forward(
-        self, inputs_embeds: torch.Tensor, *, num_passes: int | None = None,
-        num_gradient_passes: int | None = None, document_ids: torch.Tensor | None = None,
-        attention_mask: torch.Tensor | None = None, checkpoint_chunk_size: int = 0,
-        past_key_values=None, position_ids: torch.Tensor | None = None, **kwargs,
+        self,
+        inputs_embeds: torch.Tensor,
+        *,
+        num_passes: int | None = None,
+        num_gradient_passes: int | None = None,
+        document_ids: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        checkpoint_chunk_size: int = 0,
+        past_key_values=None,
+        position_ids: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         if past_key_values is not None or position_ids is not None:
             raise NotImplementedError("depth-causal study does not implement cached generation")
@@ -136,11 +150,21 @@ class DepthCausalDecoder(WhiteMatterDecoder):
         if checkpoint_chunk_size or kwargs:
             raise ValueError("depth-causal study does not use iterative checkpoint options")
         x, attention_mask, document_ids = prepare_decoder_inputs(
-            inputs_embeds, self.config, attention_mask, document_ids,
+            inputs_embeds,
+            self.config,
+            attention_mask,
+            document_ids,
         )
-        ordinary_args = prepare_attention_inputs(
-            x, document_ids, self.rotary_emb, self.config._attn_implementation,
-        ) if self.pre_layers or self.post_layers else {}
+        ordinary_args = (
+            prepare_attention_inputs(
+                x,
+                document_ids,
+                self.rotary_emb,
+                self.config._attn_implementation,
+            )
+            if self.pre_layers or self.post_layers
+            else {}
+        )
         x = run_feedforward_layers(self.pre_layers, x, **ordinary_args)
         x = self.block.forward_depth_causal(x, document_ids=document_ids)
         return run_feedforward_layers(self.post_layers, x, **ordinary_args)

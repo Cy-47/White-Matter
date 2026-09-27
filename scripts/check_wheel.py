@@ -1,4 +1,5 @@
 """Reject application code and run artifacts from the distributable wheel."""
+
 import sys
 from zipfile import ZipFile
 
@@ -9,11 +10,28 @@ def main():
     with ZipFile(sys.argv[1]) as wheel:
         names = wheel.namelist()
         code = [name for name in names if name.endswith(".py")]
-        assert code and all(name.startswith("white_matter/") for name in code), code
-        forbidden = {"training", "evals", "recipes", "tests", "outputs", "checkpoints", "migration", "studies", "scripts", "slurm", "__pycache__"}
+        assert code, code
+        assert all(name.startswith("white_matter/") for name in code), code
+        forbidden = {
+            "training",
+            "evals",
+            "recipes",
+            "tests",
+            "outputs",
+            "checkpoints",
+            "migration",
+            "studies",
+            "scripts",
+            "slurm",
+            "__pycache__",
+        }
         assert not any(forbidden.intersection(name.split("/")) for name in names), names
         assert not any(name.endswith((".pt", ".safetensors", ".pyc", "entry_points.txt")) for name in names)
-        for required in ("ops/cyclic_attention/functional.py", "blocks/lckv.py", "models/white_matter/modeling_white_matter.py"):
+        for required in (
+            "ops/cyclic_attention/functional.py",
+            "blocks/lckv.py",
+            "models/white_matter/modeling_white_matter.py",
+        ):
             assert f"white_matter/{required}" in names
         assert "white_matter/py.typed" in names, "missing PEP 561 typing marker"
         for license_file in ("LICENSE", "NOTICE", "LICENSES/Apache-2.0.txt"):

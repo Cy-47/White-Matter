@@ -5,9 +5,9 @@ from studies.schedules.matrix import validate_recipe
 
 
 def main() -> None:
+    from training.engine import train
     from training.recipes import load_recipe
     from training.train import parse_args
-    from training.engine import train
 
     args = parse_args()
     recipe = load_recipe(args.recipe)

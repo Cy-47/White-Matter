@@ -12,10 +12,10 @@ import torch.nn.functional as F
 from white_matter._typing import dynamo_disable, dynamo_disable_nonrecursive
 from white_matter.modules.checkpointing import checkpoint_pointwise
 from white_matter.modules.precision import model_autocast_context
-
-from . import resolve_passes
-from ..decoder_layer import run_feedback_layers
 from white_matter.ops import CyclicAttentionMetadata
+
+from ..decoder_layer import run_feedback_layers
+from . import resolve_passes
 
 if TYPE_CHECKING:
     from white_matter.blocks.white_matter import WhiteMatterBlock
@@ -85,7 +85,7 @@ def _rebuild_state(
 
 
 def _training_group(
-    block: "WhiteMatterBlock",
+    block: WhiteMatterBlock,
     x: torch.Tensor,
     base_keys: torch.Tensor,
     base_values: torch.Tensor,
@@ -106,11 +106,21 @@ def _training_group(
     keys = _rebuild_state(base_keys, update_positions, key_updates)
     values = _rebuild_state(base_values, update_positions, value_updates)
     hidden, layer_inputs = _group_layers(
-        block, x, keys.unbind(0), values.unbind(0), positions,
-        query_rope, groups, offset, return_output, metadata,
+        block,
+        x,
+        keys.unbind(0),
+        values.unbind(0),
+        positions,
+        query_rope,
+        groups,
+        offset,
+        return_output,
+        metadata,
     )
     keys, values = block.kv_pool.project_sequence(
-        torch.stack(layer_inputs, dim=2), key_rope, dummy_token=dummy_token,
+        torch.stack(layer_inputs, dim=2),
+        key_rope,
+        dummy_token=dummy_token,
     )
     keys, values = keys[..., 1:, :].transpose(0, 1), values[..., 1:, :].transpose(0, 1)
     if terminal:
@@ -163,16 +173,35 @@ def forward_cyclic(
         raise ValueError("cyclic_groups must be a positive integer")
     if x.ndim != 3 or x.shape[1] < 1:
         raise ValueError("inputs must have a nonempty batch/sequence/hidden layout")
-    if kv_cache is not None and (torch.is_grad_enabled() or attention_mask is not None or document_ids is not None
-                                 or x.shape[1] <= cyclic_groups or num_gradient_passes):
-        raise ValueError("bounded cyclic prefill requires no gradients, unpadded single-document inputs longer than the group count")
+    if kv_cache is not None and (
+        torch.is_grad_enabled()
+        or attention_mask is not None
+        or document_ids is not None
+        or x.shape[1] <= cyclic_groups
+        or num_gradient_passes
+    ):
+        raise ValueError(
+            "bounded cyclic prefill requires no gradients, unpadded single-document inputs longer than the group count"
+        )
     # One inference schedule, whether storage is temporary or caller-owned.
-    bounded = kv_cache is not None or (x.is_cuda and torch.is_autocast_enabled("cuda")
-                                      and not self.training and not torch.is_grad_enabled() and not num_gradient_passes)
+    bounded = kv_cache is not None or (
+        x.is_cuda
+        and torch.is_autocast_enabled("cuda")
+        and not self.training
+        and not torch.is_grad_enabled()
+        and not num_gradient_passes
+    )
     if bounded and torch.compiler.is_compiling():
         return inference_forward(
-            self, x, num_passes=n_iter, num_gradient_passes=num_gradient_passes, cyclic_groups=cyclic_groups,
-            attention_mask=attention_mask, document_ids=document_ids, output_final_state=output_final_state, kv_cache=kv_cache,
+            self,
+            x,
+            num_passes=n_iter,
+            num_gradient_passes=num_gradient_passes,
+            cyclic_groups=cyclic_groups,
+            attention_mask=attention_mask,
+            document_ids=document_ids,
+            output_final_state=output_final_state,
+            kv_cache=kv_cache,
             on_pass=on_pass,
         )
     n_passes_no_grad = n_iter - num_gradient_passes
@@ -254,9 +283,15 @@ def forward_cyclic(
             for p in range(count):
                 last = p == count - 1
                 h, K, V, layer_hidden_states = execute_pass(
-                    x, K, V, dummy_token, *pass_inputs, metadata=metadata,
+                    x,
+                    K,
+                    V,
+                    dummy_token,
+                    *pass_inputs,
+                    metadata=metadata,
                     return_hidden_states=detached and last and num_gradient_passes > 0,
-                    consume_state=detached, pool_chunk_size=64 if kv_cache is not None else 0,
+                    consume_state=detached,
+                    pool_chunk_size=64 if kv_cache is not None else 0,
                     return_output=on_pass is not None or (last and (not detached or not num_gradient_passes)),
                     output_final_state=output_final_state and last and (not detached or not num_gradient_passes),
                 )
@@ -315,7 +350,9 @@ def run_pass(
     V = V_initial.clone() if inplace and not consume_state else V_initial
     final_kv = None
     if pool_chunk_size:
-        assert inplace and not return_hidden_states and not compact_fixed
+        assert inplace
+        assert not return_hidden_states
+        assert not compact_fixed
 
     if compact_fixed and not inplace and not return_hidden_states and not output_final_state:
         outputs = []
@@ -326,10 +363,22 @@ def run_pass(
         for offset, positions in enumerate(query_groups):
             terminal = offset == terminal_group
             hidden, keys, values = _run_training_group(
-                self, x_in, K_initial, V_initial,
-                tuple(update_positions), tuple(key_updates), tuple(value_updates),
-                dummy_token, positions, query_group_rope[offset], key_group_rope[offset],
-                None if metadata is None else metadata[offset], len(query_groups), offset, return_output, terminal,
+                self,
+                x_in,
+                K_initial,
+                V_initial,
+                tuple(update_positions),
+                tuple(key_updates),
+                tuple(value_updates),
+                dummy_token,
+                positions,
+                query_group_rope[offset],
+                key_group_rope[offset],
+                None if metadata is None else metadata[offset],
+                len(query_groups),
+                offset,
+                return_output,
+                terminal,
             )
             if return_output:
                 outputs.append(hidden)
@@ -354,8 +403,16 @@ def run_pass(
             channel_keys = tuple(tensor[..., :-1, :].contiguous() for tensor in K.unbind(1))
             channel_values = tuple(tensor[..., :-1, :].contiguous() for tensor in V.unbind(1))
         h, chunk_layer_inputs = execute_layers(
-            self, x_in, channel_keys, channel_values, chunk_positions, query_group_rope[c],
-            len(query_groups), c, return_output, None if metadata is None else metadata[c],
+            self,
+            x_in,
+            channel_keys,
+            channel_values,
+            chunk_positions,
+            query_group_rope[c],
+            len(query_groups),
+            c,
+            return_output,
+            None if metadata is None else metadata[c],
         )
         if h is not None:
             if output is not None:
@@ -366,9 +423,15 @@ def run_pass(
         if pool_chunk_size:
             for start in range(0, chunk_positions.numel(), pool_chunk_size):
                 stop = min(start + pool_chunk_size, chunk_positions.numel())
-                rope = tuple(t[:, start + 1:stop + 1] for t in key_group_rope[c])
-                _write_pool(self, [state[:, start:stop] for state in chunk_layer_inputs], K, V,
-                            chunk_positions[start:stop] + 1, (rope[0], rope[1]))
+                rope = tuple(t[:, start + 1 : stop + 1] for t in key_group_rope[c])
+                _write_pool(
+                    self,
+                    [state[:, start:stop] for state in chunk_layer_inputs],
+                    K,
+                    V,
+                    chunk_positions[start:stop] + 1,
+                    (rope[0], rope[1]),
+                )
             del chunk_layer_inputs
             continue
         chunk_layer_states = torch.stack(chunk_layer_inputs, dim=2)
@@ -376,9 +439,7 @@ def run_pass(
         if return_hidden_states:
             layer_inputs_per_chunk.append(chunk_layer_states)
         # Keep the dummy row during projection: changing GEMM shape changes BF16 gradients.
-        K_src, V_src = self.kv_pool.project_sequence(
-            chunk_layer_states, key_group_rope[c], dummy_token=dummy_token
-        )
+        K_src, V_src = self.kv_pool.project_sequence(chunk_layer_states, key_group_rope[c], dummy_token=dummy_token)
         del chunk_layer_states
         K_src, V_src = K_src[..., 1:, :], V_src[..., 1:, :]
         # Publish after the layer sweep: later groups read these refreshed K/V.
@@ -422,8 +483,12 @@ inference_forward = dynamo_disable(forward_cyclic)
 
 @torch.compile(fullgraph=True, dynamic=True, options={"emulate_precision_casts": True, "max_autotune": True})
 def _write_pool(
-    block: "WhiteMatterBlock", states: list[torch.Tensor], keys: torch.Tensor, values: torch.Tensor,
-    slots: torch.Tensor, rope: tuple[torch.Tensor, torch.Tensor],
+    block: WhiteMatterBlock,
+    states: list[torch.Tensor],
+    keys: torch.Tensor,
+    values: torch.Tensor,
+    slots: torch.Tensor,
+    rope: tuple[torch.Tensor, torch.Tensor],
 ) -> None:
     key, value = block.kv_pool.project_sequence(torch.stack(states, dim=2), rope)
     keys.index_copy_(3, slots, key)
@@ -431,20 +496,35 @@ def _write_pool(
 
 
 def _group_layers(
-    block: "WhiteMatterBlock", x: torch.Tensor, keys: Sequence[torch.Tensor], values: Sequence[torch.Tensor], positions: torch.Tensor,
-    rope: tuple[torch.Tensor, torch.Tensor], groups: int, offset: int, return_output: bool,
+    block: WhiteMatterBlock,
+    x: torch.Tensor,
+    keys: Sequence[torch.Tensor],
+    values: Sequence[torch.Tensor],
+    positions: torch.Tensor,
+    rope: tuple[torch.Tensor, torch.Tensor],
+    groups: int,
+    offset: int,
+    return_output: bool,
     metadata: CyclicAttentionMetadata | None = None,
 ) -> tuple[torch.Tensor | None, list[torch.Tensor]]:
     # Specialize batches while keeping ragged query lengths symbolic.
     if not block.training and not torch.is_grad_enabled():
         torch._dynamo.mark_static(x, 0)
     hidden, states = run_feedback_layers(
-        block.layers, x.index_select(1, positions), keys, values, rope,
+        block.layers,
+        x.index_select(1, positions),
+        keys,
+        values,
+        rope,
         return_output=return_output,
-        query_stride=groups, query_offset=offset, metadata=metadata,
+        query_stride=groups,
+        query_offset=offset,
+        metadata=metadata,
     )
     # The final layer has no pool output, so non-output passes stop at its input.
     return hidden if return_output else None, states
 
 
-_inference_layers = torch.compile(_group_layers, fullgraph=True, dynamic=True, options={"emulate_precision_casts": True})
+_inference_layers = torch.compile(
+    _group_layers, fullgraph=True, dynamic=True, options={"emulate_precision_casts": True}
+)

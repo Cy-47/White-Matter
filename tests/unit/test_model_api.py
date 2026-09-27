@@ -21,7 +21,8 @@ def tiny_config(architecture="vanilla", **kwargs):
         head_dim=8,
         max_position_embeddings=64,
         rope_theta=10_000.0,
-        eos_token_id=100, document_separator_token_id=100,
+        eos_token_id=100,
+        document_separator_token_id=100,
         num_kv_channels=2 if architecture == "white_matter" else None,
         **kwargs,
     )

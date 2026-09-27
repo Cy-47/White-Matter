@@ -8,17 +8,19 @@ import math
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM
 
 from studies.protocol import (
-    PAPER_SEQUENCE_LENGTH, PAPER_TEST_SEQUENCES, PAPER_TEST_TARGETS,
-    evaluate_fixed_passes, validate_paper_cache,
+    PAPER_SEQUENCE_LENGTH,
+    PAPER_TEST_TARGETS,
+    evaluate_fixed_passes,
+    paper_test_loader,
+    validate_final_checkpoint,
+    validate_paper_cache,
 )
-from studies.rank.train import ARMS, RECIPE_DIR, validate_recipe
-from training.data import TokenCacheDataset
+from studies.rank.protocol import ARMS, RECIPE_DIR, validate_recipe
 from training.precision import configure_precision
-from training.recipes import load_recipe, model_recipe_keys
+from training.recipes import load_recipe
 from white_matter.models import register_models
 
 
@@ -31,18 +33,7 @@ def validate_checkpoint(config) -> tuple[str, int]:
         raise ValueError(f"unknown Figure 7b arm: {arm}")
     recipe = load_recipe(RECIPE_DIR / f"{arm}.yaml")
     validate_recipe(recipe, RECIPE_DIR / f"{arm}.yaml")
-    expected = recipe.model
-    if config.model_type != expected.model_type:
-        raise ValueError("checkpoint model family differs from its recipe")
-    for key in model_recipe_keys(type(expected)):
-        if key == "model_type":
-            continue
-        if getattr(config, key, None) != getattr(expected, key, None):
-            raise ValueError(f"checkpoint {key} differs from its Figure 7b recipe")
-    if getattr(config, "training_step", None) != 20_000:
-        raise ValueError("checkpoint must be the final 20,000-step model")
-    if getattr(config, "training_sequence_length", None) != PAPER_SEQUENCE_LENGTH:
-        raise ValueError("checkpoint must have been trained on 2048-token rows")
+    validate_final_checkpoint(config, recipe.model)
     return arm, 1 if arm in {"vanilla", "k16_depth_causal"} else 3
 
 
@@ -83,14 +74,7 @@ def main() -> None:
         from training.compile import compile_feedback
 
         compile_feedback(model, mode="default")
-    dataset = TokenCacheDataset(
-        args.data_dir, split="test", sequence_length=PAPER_SEQUENCE_LENGTH,
-        n_train=9_765_625, n_val=2_000, n_test=PAPER_TEST_SEQUENCES,
-    )
-    loader = DataLoader(
-        dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=2, pin_memory=device.type == "cuda",
-    )
+    loader = paper_test_loader(args.data_dir, batch_size=args.batch_size, device=device)
     loss_sum, targets = evaluate_fixed_passes(model, loader, num_passes=passes)
     if targets != PAPER_TEST_TARGETS:
         raise RuntimeError(f"expected {PAPER_TEST_TARGETS} prediction targets, got {targets}")
@@ -100,11 +84,13 @@ def main() -> None:
         "checkpoint": str(args.model),
         "recipe": model.config.recipe_name,
         "split": "test",
-        "n_seq": len(dataset),
+        "n_seq": len(loader.dataset),
         "n_tok": targets,
         "T": PAPER_SEQUENCE_LENGTH,
         "n_passes": passes,
-        "forward_mode": "depth_causal" if arm == "k16_depth_causal" else ("single_pass" if arm == "vanilla" else "cyclic"),
+        "forward_mode": "depth_causal"
+        if arm == "k16_depth_causal"
+        else ("single_pass" if arm == "vanilla" else "cyclic"),
         "loss": "token-weighted next-token LM cross-entropy (cce_exact on CUDA)",
         "lm_ce": loss_sum / targets,
         "perplexity": math.exp(loss_sum / targets),

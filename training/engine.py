@@ -17,19 +17,19 @@ from torch.utils.data.distributed import DistributedSampler
 from training.checkpoint import (
     gather_rng_states_for_rank0,
     load_training_checkpoint,
+    resolve_training_resume,
+    resolved_config_sha256,
     restore_rng_states,
     save_training_checkpoint,
-    validate_resume_training_identity,
-    resolved_config_sha256,
     training_source_sha256,
+    validate_resume_training_identity,
 )
 from training.data import _new_loader_iterator, _resume_sequential_loader
 from training.distributed import (
     broadcast_params,
-    setup_distributed,
     initialize_all_reduce,
+    setup_distributed,
 )
-from training.step import prepare_training_forward, training_gradients
 from training.metrics import MetricsLogger
 from training.optim import (
     build_optimizers,
@@ -37,6 +37,7 @@ from training.optim import (
     step_optimizers,
 )
 from training.recipes import TrainingRecipe, per_rank_batch_size
+from training.step import prepare_training_forward, training_gradients
 
 
 def log(msg: str) -> None:
@@ -63,23 +64,8 @@ def train(recipe: TrainingRecipe, args: argparse.Namespace) -> None:
         "resolved_config_sha256": resolved_config_sha256(cfg),
         "training_source_sha256": training_source_digest,
     }
-    results_path = Path(args.output_dir)
-    full_checkpoint_path = results_path / "ckpt_full.pt"
-    resume_checkpoint = (
-        Path(args.resume_from_checkpoint).expanduser().resolve()
-        if args.resume_from_checkpoint is not None
-        else full_checkpoint_path
-    )
-    if args.resume_from_checkpoint is not None and not resume_checkpoint.is_file():
-        raise FileNotFoundError(f"resume checkpoint does not exist: {resume_checkpoint}")
-    if results_path.exists() and not results_path.is_dir():
-        raise ValueError(f"results path is not a directory: {results_path}")
-    if args.resume_from_checkpoint is not None and full_checkpoint_path.exists():
-        if resume_checkpoint != full_checkpoint_path.resolve():
-            raise ValueError(
-                "output directory already has ckpt_full.pt; remove the explicit "
-                "--resume-from-checkpoint or choose a new output directory"
-            )
+    results_path = Path(args.output_dir).expanduser().resolve()
+    resume_checkpoint = resolve_training_resume(results_path, args.resume_from_checkpoint)
     rank, world, local_rank, device, is_rank0 = setup_distributed()
     initialize_all_reduce(device)
     seed = recipe.seed
@@ -383,7 +369,13 @@ def train(recipe: TrainingRecipe, args: argparse.Namespace) -> None:
                 yield batch["input_ids"].to(device=device, non_blocking=True)
 
         loss_value, grad_norm = training_gradients(
-            model, training_forward, optimizers, microbatches(), recipe, world=world, check_gradients=check_gradients,
+            model,
+            training_forward,
+            optimizers,
+            microbatches(),
+            recipe,
+            world=world,
+            check_gradients=check_gradients,
         )
         if check_gradients:
             gradients_checked = True

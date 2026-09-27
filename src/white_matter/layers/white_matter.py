@@ -12,12 +12,11 @@ from importlib.util import find_spec
 from typing import Literal, Protocol
 
 import torch
-
-from white_matter.modules.documents import document_cu_seqlens, document_start_mask
 import torch.nn as nn
 import torch.nn.functional as F
 
 from white_matter._typing import compiler_disable
+from white_matter.modules.documents import document_cu_seqlens, document_start_mask
 from white_matter.modules.rotary import rotate_half
 from white_matter.ops import CyclicAttentionMetadata, cyclic_attention
 
@@ -168,7 +167,9 @@ def _lckv_sdpa_attention(
 
 
 def _jacobi_document_keys(
-    key: torch.Tensor, value: torch.Tensor, document_ids: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    document_ids: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Replace each document's first shifted key with the shared dummy key."""
     batch, _, length, _ = key.shape
@@ -182,8 +183,11 @@ def _jacobi_document_keys(
 
 @compiler_disable
 def _jacobi_flash_attention(
-    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
-    document_ids: torch.Tensor | None, scale: float,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    document_ids: torch.Tensor | None,
+    scale: float,
 ) -> torch.Tensor:
     """Causal FlashAttention over dummy-shifted Jacobi keys, per document."""
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -196,10 +200,16 @@ def _jacobi_flash_attention(
     key, value, cu = _jacobi_document_keys(key, value, document_ids)
     k, v = (tensor.transpose(1, 2).to(dtype).flatten(0, 1) for tensor in (key, value))
     output = flash_attn_varlen_func(
-        q.flatten(0, 1), k, v,
-        cu_seqlens_q=cu, cu_seqlens_k=cu,
-        max_seqlen_q=query.shape[-2], max_seqlen_k=query.shape[-2],
-        dropout_p=0.0, softmax_scale=scale, causal=True,
+        q.flatten(0, 1),
+        k,
+        v,
+        cu_seqlens_q=cu,
+        cu_seqlens_k=cu,
+        max_seqlen_q=query.shape[-2],
+        max_seqlen_k=query.shape[-2],
+        dropout_p=0.0,
+        softmax_scale=scale,
+        causal=True,
     )
     return output.view(query.shape[0], query.shape[-2], query.shape[1], query.shape[-1]).to(query.dtype)
 
@@ -266,7 +276,9 @@ class WhiteMatterAttention(nn.Module):
             # Sequential readers receive only earlier tokens. Prefix visibility
             # is independent of whether storage is cached or differentiable.
             output = attention_forward(
-                query_states, key_states, value_states,
+                query_states,
+                key_states,
+                value_states,
                 attention_mask=decode_key_mask,
                 scaling=self.scaling,
                 implementation="sdpa" if decode_key_mask is not None else self.attention_implementation,
@@ -284,22 +296,39 @@ class WhiteMatterAttention(nn.Module):
         elif jacobi:
             # Jacobi's shifted keys have a dedicated FlashAttention schedule;
             # ordinary decoder attention settings govern only other paths.
-            if query_states.is_cuda and self.head_dim <= 256 and _flash_attn_available() and not getattr(
-                self, "_force_jacobi_reference", False
+            if (
+                query_states.is_cuda
+                and self.head_dim <= 256
+                and _flash_attn_available()
+                and not getattr(self, "_force_jacobi_reference", False)
             ):
                 output = _jacobi_flash_attention(
-                    query_states, key_states, value_states, document_ids, self.scaling,
+                    query_states,
+                    key_states,
+                    value_states,
+                    document_ids,
+                    self.scaling,
                 ).to(projection_dtype)
             else:
-                output = cyclic_attention(
-                    query_states, key_states.to(query_states.dtype), value_states.to(query_states.dtype),
-                    query_stride=1, metadata=metadata, backend="reference",
-                ).to(projection_dtype).transpose(1, 2)
+                output = (
+                    cyclic_attention(
+                        query_states,
+                        key_states.to(query_states.dtype),
+                        value_states.to(query_states.dtype),
+                        query_stride=1,
+                        metadata=metadata,
+                        backend="reference",
+                    )
+                    .to(projection_dtype)
+                    .transpose(1, 2)
+                )
         elif query_stride is not None or (metadata is not None and decode_key_mask is None):
             # Cyclic and depth-causal readers use explicit dummy-shifted bounds.
             backend: Literal["tilelang", "reference"] = (
                 "tilelang"
-                if query_stride is not None and query_states.is_cuda and not getattr(self, "_force_cyclic_reference", False)
+                if query_stride is not None
+                and query_states.is_cuda
+                and not getattr(self, "_force_cyclic_reference", False)
                 else "reference"
             )
             dtype = torch.bfloat16 if backend == "tilelang" else query_states.dtype

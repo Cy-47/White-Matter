@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+
 class FeedForward(Protocol):
     """Forward contract for a replaceable PyTorch module."""
 

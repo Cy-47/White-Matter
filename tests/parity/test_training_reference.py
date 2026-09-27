@@ -16,7 +16,8 @@ def test_microbatch_clipping_accumulation_and_update_match_native_reference():
     config = AutoConfig.for_model(
         "white_matter",
         vocab_size=101,
-        eos_token_id=100, document_separator_token_id=100,
+        eos_token_id=100,
+        document_separator_token_id=100,
         hidden_size=32,
         intermediate_size=64,
         num_hidden_layers=2,

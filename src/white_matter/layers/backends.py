@@ -19,7 +19,9 @@ import torch.nn.functional as F
 
 
 def pack_kv_cache(
-    key: torch.Tensor, value: torch.Tensor, keep: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    keep: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Move visible slots first in (B,...,N,d) caches without host synchronization."""
     lengths = keep.sum(-1, dtype=torch.int32)
@@ -50,6 +52,7 @@ def attention_forward(
     repeats = query.shape[1] // key.shape[1]
     if implementation == "flash_attention_2":
         from flash_attn import flash_attn_func
+
         from white_matter.ops.flash_attention import flash_attention_decode
 
         if attention_mask is not None:
@@ -60,7 +63,9 @@ def attention_forward(
             # All supplied keys are already visible; WM appends this token only after its layer sweep.
             return flash_attention_decode(query, key, value, cache_seqlens, scaling, is_causal, num_splits)
         return flash_attn_func(
-            query, key, value,
+            query,
+            key,
+            value,
             dropout_p=0.0,
             softmax_scale=scaling,
             causal=is_causal,

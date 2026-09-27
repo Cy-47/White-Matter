@@ -26,5 +26,10 @@ _context = partial(create_selective_checkpoint_contexts, _policy)
 def checkpoint_pointwise(function: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
     """Save matrix products and reconstruct the surrounding pointwise work."""
     return checkpoint(
-        function, *args, use_reentrant=False, preserve_rng_state=False, context_fn=_context, **kwargs,
+        function,
+        *args,
+        use_reentrant=False,
+        preserve_rng_state=False,
+        context_fn=_context,
+        **kwargs,
     )

@@ -1,4 +1,5 @@
 """Exercise the harness adapter through HF's cached and uncached generation."""
+
 from types import SimpleNamespace
 
 import pytest
@@ -28,29 +29,46 @@ def adapter(prefill="autoregressive", device="cpu", family="white_matter"):
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, pad_token="<pad>", eos_token="<eos>")
     options = {}
     if family == "white_matter":
-        options = dict(num_kv_channels=1, cyclic_groups=2, num_passes=2,
-                       execution_mode="cyclic", prefill_mode=prefill)
+        options = {
+            "num_kv_channels": 1,
+            "cyclic_groups": 2,
+            "num_passes": 2,
+            "execution_mode": "cyclic",
+            "prefill_mode": prefill,
+        }
     config = AutoConfig.for_model(
-        family, vocab_size=len(vocab), hidden_size=64 if device == "cuda" else 16,
+        family,
+        vocab_size=len(vocab),
+        hidden_size=64 if device == "cuda" else 16,
         intermediate_size=128 if device == "cuda" else 24,
-        num_hidden_layers=2, num_attention_heads=1, num_key_value_heads=1, head_dim=64 if device == "cuda" else 16,
+        num_hidden_layers=2,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        head_dim=64 if device == "cuda" else 16,
         max_position_embeddings=256 if device == "cuda" else 32,
-        pad_token_id=0, eos_token_id=1, document_separator_token_id=None, **options,
+        pad_token_id=0,
+        eos_token_id=1,
+        document_separator_token_id=None,
+        **options,
     )
     config._attn_implementation = "flash_attention_2" if device == "cuda" else "sdpa"
     model = AutoModelForCausalLM.from_config(config).to(device).eval()
     return WhiteMatterHarnessLM(model=model, tokenizer=tokenizer, batch_size=2)
 
 
-@pytest.mark.parametrize("family,prefill", [
-    ("white_matter", "autoregressive"), ("white_matter", "cyclic"),
-    ("white_matter", "jacobi"), ("fusedkv", None),
-])
+@pytest.mark.parametrize(
+    ("family", "prefill"),
+    [
+        ("white_matter", "autoregressive"),
+        ("white_matter", "cyclic"),
+        ("white_matter", "jacobi"),
+        ("fusedkv", None),
+    ],
+)
 def test_generation_stops_without_mutating_requests(family, prefill, monkeypatch):
     lm = adapter(prefill, family=family)
     generated = lm.tok_encode("XYZ")
-    options = {"until": ["XY"], "max_gen_toks": 5,
-               "logits_processor": [ForcedTokens(3, generated)]}
+    options = {"until": ["XY"], "max_gen_toks": 5, "logits_processor": [ForcedTokens(3, generated)]}
     requests = [SimpleNamespace(args=(context, options)) for context in ["a", "abc"]]
     calls = []
     forward = lm.model.forward
@@ -61,6 +79,7 @@ def test_generation_stops_without_mutating_requests(family, prefill, monkeypatch
 
     # Preserve the signature used by HF generation's model-kwargs validation.
     import functools
+
     monkeypatch.setattr(lm.model, "forward", functools.wraps(forward)(record))
     assert lm.generate_until(requests) == ["", ""]
     assert [length for _, length in calls] == ([3, 4] if family == "fusedkv" else [3, 1])
@@ -70,7 +89,8 @@ def test_generation_stops_without_mutating_requests(family, prefill, monkeypatch
         assert calls[0][0] is not None
         assert all(cache is calls[0][0] for cache, _ in calls)
         assert lm.model.config.prefill_mode == prefill
-    assert options["until"] == ["XY"] and "use_cache" not in options
+    assert options["until"] == ["XY"]
+    assert "use_cache" not in options
 
 
 @pytest.mark.parametrize("execution_mode", ["cyclic", "jacobi"])
@@ -110,24 +130,31 @@ def test_generation_restores_order_across_options_and_honors_eos(family):
     lm = adapter(family=family)
     requests = [
         SimpleNamespace(args=("a", {"max_gen_toks": 3, "logits_processor": [ForcedTokens(1, [1])]})),
-        SimpleNamespace(args=("abc", {"max_gen_toks": 2,
-                                      "logits_processor": [ForcedTokens(3, lm.tok_encode("Z"))]})),
+        SimpleNamespace(args=("abc", {"max_gen_toks": 2, "logits_processor": [ForcedTokens(3, lm.tok_encode("Z"))]})),
     ]
     assert lm.generate_until(requests) == ["", "ZZ"]
 
 
-@pytest.mark.parametrize("options", [{"max_gen_toks": 32}, {"num_beams": 2}, {"until": [""]}])
-def test_generation_rejects_unsupported_options(options):
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"max_gen_toks": 32}, "max_gen_toks must be positive and smaller than max_length"),
+        ({"num_beams": 2}, "without beam search"),
+        ({"until": [""]}, "until must contain nonempty strings"),
+    ],
+)
+def test_generation_rejects_unsupported_options(options, message):
     lm = adapter()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=message):
         lm.generate_until([SimpleNamespace(args=("a", options))])
 
 
 @pytest.mark.parametrize("family", ["white_matter", "fusedkv"])
 def test_stop_strings_do_not_match_across_prompt_boundary(family):
     lm = adapter(family=family)
-    request = SimpleNamespace(args=("X", {"max_gen_toks": 2, "until": ["XY"],
-                                         "logits_processor": [ForcedTokens(1, lm.tok_encode("YZ"))]}))
+    request = SimpleNamespace(
+        args=("X", {"max_gen_toks": 2, "until": ["XY"], "logits_processor": [ForcedTokens(1, lm.tok_encode("YZ"))]})
+    )
     assert lm.generate_until([request]) == ["YZ"]
 
 

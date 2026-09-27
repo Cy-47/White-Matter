@@ -272,9 +272,7 @@ def partition_optimizer_parameters(
         else:
             (main_nodecay if nodecay else main_decay).append(parameter)
 
-    main_nodecay.extend(
-        p for p in (model.get_input_embeddings().weight, model.model.norm.weight) if p.requires_grad
-    )
+    main_nodecay.extend(p for p in (model.get_input_embeddings().weight, model.model.norm.weight) if p.requires_grad)
     return main_decay, main_nodecay, muon_main
 
 

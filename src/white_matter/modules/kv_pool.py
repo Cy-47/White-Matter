@@ -7,13 +7,15 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from .checkpointing import checkpoint_pointwise
 from .rotary import rotate_half
 from .routing import FixedSourceMixer, Router, _RoutedMixer
-from .checkpointing import checkpoint_pointwise
 
 
 def _premix(
-    normed: torch.Tensor, k_weight: torch.Tensor, v_weight: torch.Tensor,
+    normed: torch.Tensor,
+    k_weight: torch.Tensor,
+    v_weight: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return ((normed * k_weight).bfloat16(), (normed * v_weight).bfloat16())
 
@@ -82,9 +84,9 @@ class KVPool(nn.Module):
                 )
             )
         )
-        self.post_mix = nn.ParameterDict({
-            name: nn.Parameter(torch.ones(num_kv_channels, hidden_size)) for name in ("k_gain", "v_gain")
-        })
+        self.post_mix = nn.ParameterDict(
+            {name: nn.Parameter(torch.ones(num_kv_channels, hidden_size)) for name in ("k_gain", "v_gain")}
+        )
 
         self.pre_mix_k_weight = nn.Parameter(torch.ones(num_layers, self.hidden_size))
         self.pre_mix_v_weight = nn.Parameter(torch.ones(num_layers, self.hidden_size))
@@ -99,8 +101,7 @@ class KVPool(nn.Module):
 
     def _project(self, stacked: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # Mix (B,T,L,D) source-layer inputs into (B,T,k,D) channels before projection.
-        fixed_source = (not self.training and not torch.is_grad_enabled()
-                        and type(self.mixer) is FixedSourceMixer)
+        fixed_source = not self.training and not torch.is_grad_enabled() and type(self.mixer) is FixedSourceMixer
         if fixed_source:
             # LCKV's other source coefficients are exactly zero. Slice before
             # normalization and K/V premixing to avoid L full-size temporaries.
@@ -109,14 +110,20 @@ class KVPool(nn.Module):
         shape = (1, 1, stacked.shape[2], self.hidden_size)
         k_weight = self.pre_mix_k_weight[-1:] if fixed_source else self.pre_mix_k_weight
         v_weight = self.pre_mix_v_weight[-1:] if fixed_source else self.pre_mix_v_weight
-        fused = (not self.training and not torch.is_grad_enabled() and stacked.is_cuda
-                 and torch.is_autocast_enabled("cuda") and torch.get_autocast_dtype("cuda") == torch.bfloat16
-                 and type(self.mixer) is _RoutedMixer)
+        fused = (
+            not self.training
+            and not torch.is_grad_enabled()
+            and stacked.is_cuda
+            and torch.is_autocast_enabled("cuda")
+            and torch.get_autocast_dtype("cuda") == torch.bfloat16
+            and type(self.mixer) is _RoutedMixer
+        )
         if fused:
             # Cast these small weights before fusion: Inductor otherwise removes
             # their BF16 round-trip when multiplying FP32 normalized activations.
             stacked_K, stacked_V = _premix_inference(
-                normed, k_weight.view(*shape).to(stacked.dtype),
+                normed,
+                k_weight.view(*shape).to(stacked.dtype),
                 v_weight.view(*shape).to(stacked.dtype),
             )
         else:
@@ -141,11 +148,15 @@ class KVPool(nn.Module):
             h_V = h_V * self.post_mix["v_gain"][None, None].to(h_V.dtype)
         # Each channel has its own projection, shared across batch and token positions.
         K_by_channel = torch.bmm(
-            h_K if fused else h_K.permute(2, 0, 1, 3).reshape(self.num_kv_channels, batch * sequence_length, self.hidden_size),
+            h_K
+            if fused
+            else h_K.permute(2, 0, 1, 3).reshape(self.num_kv_channels, batch * sequence_length, self.hidden_size),
             self.k_proj_weight.transpose(1, 2),
         )
         V_by_channel = torch.bmm(
-            h_V if fused else h_V.permute(2, 0, 1, 3).reshape(self.num_kv_channels, batch * sequence_length, self.hidden_size),
+            h_V
+            if fused
+            else h_V.permute(2, 0, 1, 3).reshape(self.num_kv_channels, batch * sequence_length, self.hidden_size),
             self.v_proj_weight.transpose(1, 2),
         )
         channel_shape = (self.num_kv_channels, batch, sequence_length, self.num_key_value_heads, self.head_dim)
@@ -185,13 +196,15 @@ class KVPool(nn.Module):
                 rope_start = start + offset if start else 0
                 rope = tuple(t[:, rope_start : end + offset] for t in position_embeddings)
                 chunk = self.project_sequence(
-                    stacked[:, start:end], (rope[0], rope[1]), dummy_token=dummy_token if start == 0 else None,
+                    stacked[:, start:end],
+                    (rope[0], rope[1]),
+                    dummy_token=dummy_token if start == 0 else None,
                 )
                 if output is None:
                     shape = (*chunk[0].shape[:3], stacked.shape[1] + offset, chunk[0].shape[-1])
                     output = chunk[0].new_empty(shape), chunk[1].new_empty(shape)
                 for target, source in zip(output, chunk, strict=True):
-                    target[..., rope_start:end + offset, :].copy_(source)
+                    target[..., rope_start : end + offset, :].copy_(source)
                 del chunk, source
             assert output is not None
             return output

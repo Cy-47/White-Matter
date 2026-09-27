@@ -82,8 +82,14 @@ def forward_jacobi(
         if getattr(self, "checkpoint_jacobi_passes", False) and torch.is_grad_enabled():
             # Every data-dependent input is explicit for backward recomputation.
             states, hidden = checkpoint(
-                self.jacobi_pass, x, states, q_pos_emb, k_pos_emb, document_ids,
-                use_reentrant=False, preserve_rng_state=False,
+                self.jacobi_pass,
+                x,
+                states,
+                q_pos_emb,
+                k_pos_emb,
+                document_ids,
+                use_reentrant=False,
+                preserve_rng_state=False,
             )
         else:
             states, hidden = self.jacobi_pass(x, states, q_pos_emb, k_pos_emb, document_ids)
@@ -91,7 +97,8 @@ def forward_jacobi(
         # The last sweep's layer inputs define the frozen prompt memory used
         # by subsequent autoregressive tokens.
         keys, values = self.kv_pool.project_sequence(
-            states.transpose(1, 2).contiguous(), k_pos_emb,
+            states.transpose(1, 2).contiguous(),
+            k_pos_emb,
             dummy_token=getattr(self, "dummy_token", None),
         )
         return hidden, (keys, values)

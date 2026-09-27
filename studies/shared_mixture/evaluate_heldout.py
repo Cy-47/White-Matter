@@ -10,15 +10,14 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from studies.shared_mixture.model import SharedMixtureConfig, register_model
 from studies.protocol import (
     PAPER_SEQUENCE_LENGTH,
-    PAPER_TEST_SEQUENCES,
     PAPER_TEST_TARGETS,
-    validate_paper_cache,
     evaluate_fixed_passes,
+    paper_test_loader,
+    validate_paper_cache,
 )
-from training.data import TokenCacheDataset
+from studies.shared_mixture.model import SharedMixtureConfig, register_model
 from training.precision import configure_precision
 
 
@@ -93,14 +92,7 @@ def main() -> None:
         from training.compile import compile_feedback
 
         compile_feedback(model, mode="default")
-    dataset = TokenCacheDataset(
-        args.data_dir, split="test", sequence_length=PAPER_SEQUENCE_LENGTH,
-        n_train=9_765_625, n_val=2_000, n_test=PAPER_TEST_SEQUENCES,
-    )
-    loader = DataLoader(
-        dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=2, pin_memory=device.type == "cuda",
-    )
+    loader = paper_test_loader(args.data_dir, batch_size=args.batch_size, device=device)
     loss_sum, targets = evaluate_three_pass(model, loader)
     if targets != PAPER_TEST_TARGETS:
         raise RuntimeError(f"expected {PAPER_TEST_TARGETS} test targets, got {targets}")
@@ -111,7 +103,7 @@ def main() -> None:
         "checkpoint": str(args.model),
         "split": "test",
         "T": PAPER_SEQUENCE_LENGTH,
-        "n_seq": len(dataset),
+        "n_seq": len(loader.dataset),
         "n_tok": targets,
         "n_passes": 3,
         "forward_mode": "cyclic",

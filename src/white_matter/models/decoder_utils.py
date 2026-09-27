@@ -72,9 +72,13 @@ def prepare_attention_inputs(
             if document_ids is not None:
                 keys = torch.arange(seen + T, device=device)
                 queries = torch.arange(seen, seen + T, device=device)
-                keep = (document_ids[:, :, None] == past_key_values.document_ids[:, None, :]) & (queries[:, None] >= keys)
+                keep = (document_ids[:, :, None] == past_key_values.document_ids[:, None, :]) & (
+                    queries[:, None] >= keys
+                )
                 mask = x.new_zeros(keep.shape).masked_fill(~keep, torch.finfo(x.dtype).min)[:, None]
-            return dict(position_embeddings=rotary_emb(x, position_ids), attention_mask=mask, cached_attention=True, **kwargs)
+            return dict(
+                position_embeddings=rotary_emb(x, position_ids), attention_mask=mask, cached_attention=True, **kwargs
+            )
         document_ids = segment_documents_and_padding(document_ids, attention_mask, x)
     if document_ids is None:
         if position_ids is None:
@@ -88,11 +92,15 @@ def prepare_attention_inputs(
     pos_emb = rotary_emb(x, position_ids)
     if attn_impl == "flash_attention_2":
         cu = document_cu_seqlens(document_ids)
-        kwargs.update({
-            "cu_seq_lens_q": cu,
-            "cu_seq_lens_k": cu,
-            "max_length_q": T,
-            "max_length_k": T,
-        })
+        kwargs.update(
+            {
+                "cu_seq_lens_q": cu,
+                "cu_seq_lens_k": cu,
+                "max_length_q": T,
+                "max_length_k": T,
+            }
+        )
         return dict(position_embeddings=pos_emb, attention_mask=None, **kwargs)
-    return dict(position_embeddings=pos_emb, attention_mask=block_causal_additive_mask(document_ids, dtype=x.dtype), **kwargs)
+    return dict(
+        position_embeddings=pos_emb, attention_mask=block_causal_additive_mask(document_ids, dtype=x.dtype), **kwargs
+    )

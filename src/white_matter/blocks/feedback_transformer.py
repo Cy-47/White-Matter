@@ -25,7 +25,9 @@ class FeedbackMemory(nn.Module):
         self.head_dim = head_dim
 
     def forward(
-        self, states: list[torch.Tensor], position: tuple[torch.Tensor, torch.Tensor],
+        self,
+        states: list[torch.Tensor],
+        position: tuple[torch.Tensor, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if len(states) != self.layer_logits.numel():
             raise ValueError("feedback memory requires the embedding and every layer output")
@@ -49,8 +51,13 @@ class FeedbackTransformerBlock(nn.Module):
         self.rotary_emb = rotary_emb
 
     def token_step(
-        self, token: torch.Tensor, keys: torch.Tensor | None, values: torch.Tensor | None,
-        position: torch.Tensor, *, key_mask: torch.Tensor | None = None,
+        self,
+        token: torch.Tensor,
+        keys: torch.Tensor | None,
+        values: torch.Tensor | None,
+        position: torch.Tensor,
+        *,
+        key_mask: torch.Tensor | None = None,
         cache_lengths: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         rope = self.rotary_emb(token, position)
@@ -64,15 +71,23 @@ class FeedbackTransformerBlock(nn.Module):
             else:
                 assert values is not None
                 hidden = layer(
-                    hidden, keys, values, rope,
-                    decode_key_mask=key_mask, cache_seqlens=cache_lengths, committed_prefix=True,
+                    hidden,
+                    keys,
+                    values,
+                    rope,
+                    decode_key_mask=key_mask,
+                    cache_seqlens=cache_lengths,
+                    committed_prefix=True,
                 )
             states.append(hidden)
         key, value = self.memory(states, rope)
         return hidden, key, value
 
     def forward_reference(
-        self, x: torch.Tensor, *, document_ids: torch.Tensor | None = None,
+        self,
+        x: torch.Tensor,
+        *,
+        document_ids: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Differentiable token sweep using a functional, growing prefix."""
@@ -85,17 +100,23 @@ class FeedbackTransformerBlock(nn.Module):
         positions = torch.arange(x.shape[1], device=x.device).expand(x.shape[0], -1)
         if document_ids is not None:
             from white_matter.modules.documents import document_position_ids
+
             positions = document_position_ids(document_ids)
         for t in range(x.shape[1]):
             mask = None
             if document_ids is not None and t:
-                keep = document_ids[:, :t] == document_ids[:, t:t + 1]
+                keep = document_ids[:, :t] == document_ids[:, t : t + 1]
                 mask = x.new_zeros((x.shape[0], 1, 1, t)).masked_fill(~keep[:, None, None], float("-inf"))
             out, key, value = self.token_step(
-                x[:, t:t + 1], keys, values, positions[:, t:t + 1], key_mask=mask,
+                x[:, t : t + 1],
+                keys,
+                values,
+                positions[:, t : t + 1],
+                key_mask=mask,
             )
             outputs.append(out)
             keys = key if keys is None else torch.cat((keys, key), dim=-2)
             values = value if values is None else torch.cat((values, value), dim=-2)
-        assert keys is not None and values is not None
+        assert keys is not None
+        assert values is not None
         return torch.cat(outputs, dim=1), keys, values

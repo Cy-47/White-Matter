@@ -111,6 +111,8 @@ def build_program(
 
             # Natural-log LSE for backward probability reconstruction.
             for i in T.Parallel(block_M):
-                Lse[bz, by * groups + (bx * block_M + i) % groups, (bx * block_M + i) // groups] = scores_max[i] * inv_sqrt_d + T.log(logsum[i])
+                Lse[bz, by * groups + (bx * block_M + i) % groups, (bx * block_M + i) // groups] = scores_max[
+                    i
+                ] * inv_sqrt_d + T.log(logsum[i])
 
     return main

@@ -31,7 +31,8 @@ def tiny_config() -> WhiteMatterConfig:
         cyclic_groups=1,
         router_layer_stride=1,
         router_prior="shifted_identity:0.25",
-        eos_token_id=100, document_separator_token_id=100,
+        eos_token_id=100,
+        document_separator_token_id=100,
     )
 
 

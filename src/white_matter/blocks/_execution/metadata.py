@@ -5,7 +5,6 @@ from collections.abc import Sequence
 import torch
 
 from white_matter.modules.documents import document_start_mask
-
 from white_matter.ops import CyclicAttentionMetadata
 
 

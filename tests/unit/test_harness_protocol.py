@@ -1,4 +1,5 @@
 """Guard the upstream task fixes required by our evaluation protocol."""
+
 from types import SimpleNamespace
 
 import pytest

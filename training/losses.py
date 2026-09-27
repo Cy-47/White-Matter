@@ -16,8 +16,12 @@ def cce_linear_cross_entropy(
     from cut_cross_entropy import linear_cross_entropy
 
     return linear_cross_entropy(
-        hidden_normed, lm_head.weight, labels,
-        bias=getattr(lm_head, "bias", None), shift=True, impl="cce_exact",
+        hidden_normed,
+        lm_head.weight,
+        labels,
+        bias=getattr(lm_head, "bias", None),
+        shift=True,
+        impl="cce_exact",
     )
 
 

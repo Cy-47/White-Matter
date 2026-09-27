@@ -1,10 +1,12 @@
 """Shared production forward setup and clipped-gradient calculation."""
+
 import torch
 import torch.distributed as dist
+
 from training.compile import compile_feedback, compile_training_forward
+from training.distributed import all_reduce_grads
 from training.forward import TrainingForward
 from training.losses import cce_linear_cross_entropy, checkpointed_linear_cross_entropy
-from training.distributed import all_reduce_grads
 from training.optim import clip_grad_norm_if_needed_, post_clip_norm_for_monitoring
 from training.precision import assert_precision_contract, attention_kernel_context
 from white_matter.modules.precision import cast_residual, model_autocast_context, residual_activation_dtype
@@ -15,12 +17,20 @@ def prepare_training_forward(model, recipe, batch_size, *, compiled=True):
     chunk_size = 16 if recipe.model.execution_mode == "autoregressive" and not recipe.ar_cuda_graph else 0
     if compiled:
         compile_feedback(model, mode="default", ar_dynamic=recipe.model.execution_mode == "autoregressive")
-    runner = TrainingForward(model, checkpoint_chunk_size=chunk_size,
-                             external_ce=recipe.loss_backend == "cce" or chunk_size > 0).to(device)
+    runner = TrainingForward(
+        model, checkpoint_chunk_size=chunk_size, external_ce=recipe.loss_backend == "cce" or chunk_size > 0
+    ).to(device)
     if recipe.ar_cuda_graph:
         with attention_kernel_context(device):
-            runner.capture_ar_graph(torch.zeros(batch_size, recipe.data.sequence_length, model.config.hidden_size,
-                device=device, dtype=residual_activation_dtype(device, recipe.model.residual_dtype)))
+            runner.capture_ar_graph(
+                torch.zeros(
+                    batch_size,
+                    recipe.data.sequence_length,
+                    model.config.hidden_size,
+                    device=device,
+                    dtype=residual_activation_dtype(device, recipe.model.residual_dtype),
+                )
+            )
     return compile_training_forward(runner) if compiled else runner
 
 
@@ -49,41 +59,38 @@ def training_gradients(model, training_forward, optimizers, batches, recipe, *, 
     for microbatch in range(grad_accum_steps):
         model.zero_grad(set_to_none=True)
         input_ids = next(batches)
-        with attention_kernel_context(device):
-            with model_autocast_context(device):
-                embeddings = model.model.embed_tokens(input_ids)
-                decoder_inputs = cast_residual(
-                    embeddings,
+        with attention_kernel_context(device), model_autocast_context(device):
+            embeddings = model.model.embed_tokens(input_ids)
+            decoder_inputs = cast_residual(
+                embeddings,
+                residual_dtype=residual_dtype,
+            )
+            if check_gradients and microbatch == 0:
+                if embeddings.dtype != torch.float32:
+                    raise RuntimeError(f"trainable fp32 embedding produced a non-fp32 activation: {embeddings.dtype}")
+                assert_precision_contract(
+                    model,
+                    decoder_inputs,
                     residual_dtype=residual_dtype,
                 )
-                if check_gradients and microbatch == 0:
-                    if embeddings.dtype != torch.float32:
-                        raise RuntimeError(
-                            f"trainable fp32 embedding produced a non-fp32 activation: {embeddings.dtype}"
-                        )
-                    assert_precision_contract(
-                        model,
-                        decoder_inputs,
-                        residual_dtype=residual_dtype,
-                    )
-                # Norm + head + CE run in the compiled decoder runner unless
-                # an external logit-free/bounded loss was selected.
-                value = training_forward(
-                    decoder_inputs,
-                    num_passes,
-                    num_gradient_passes,
-                    token_ids=input_ids,
+            # Norm + head + CE run in the compiled decoder runner unless
+            # an external logit-free/bounded loss was selected.
+            value = training_forward(
+                decoder_inputs,
+                num_passes,
+                num_gradient_passes,
+                token_ids=input_ids,
+            )
+            if recipe.loss_backend == "cce":
+                loss = cce_linear_cross_entropy(value, input_ids, model.lm_head)
+            elif external_ce_enabled:
+                loss = checkpointed_linear_cross_entropy(
+                    value, input_ids, model.lm_head, token_chunk_size=ar_ce_token_chunk_size
                 )
-                if recipe.loss_backend == "cce":
-                    loss = cce_linear_cross_entropy(value, input_ids, model.lm_head)
-                elif external_ce_enabled:
-                    loss = checkpointed_linear_cross_entropy(
-                        value, input_ids, model.lm_head, token_chunk_size=ar_ce_token_chunk_size
-                    )
-                else:
-                    loss = value
-                del value
-                del decoder_inputs, embeddings
+            else:
+                loss = value
+            del value
+            del decoder_inputs, embeddings
 
         # Clip this microbatch before accumulation and data-parallel averaging.
         loss.backward()
@@ -95,7 +102,9 @@ def training_gradients(model, training_forward, optimizers, batches, recipe, *, 
                 for index, parameter in enumerate(params):
                     if parameter.grad is not None:
                         accumulated_grads[index] = (
-                            parameter.grad.detach().clone() if accumulated_grads[index] is None else accumulated_grads[index].add_(parameter.grad)
+                            parameter.grad.detach().clone()
+                            if accumulated_grads[index] is None
+                            else accumulated_grads[index].add_(parameter.grad)
                         )
         if check_gradients and microbatch == 0:
             assert_precision_contract(

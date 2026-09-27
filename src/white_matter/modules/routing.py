@@ -86,7 +86,11 @@ class Router(nn.Module):
         if not self.dynamic:
             # The learned bias is the complete static mixture. Match the dtype
             # a skipped linear projection would produce under autocast.
-            dtype = torch.get_autocast_dtype(stacked.device.type) if torch.is_autocast_enabled(stacked.device.type) else stacked.dtype
+            dtype = (
+                torch.get_autocast_dtype(stacked.device.type)
+                if torch.is_autocast_enabled(stacked.device.type)
+                else stacked.dtype
+            )
             logits = self.linear.bias.to(dtype).view(1, 1, self.num_kv_channels, self.num_layers)
             return logits.expand(batch, sequence_length, -1, -1).to(stacked.dtype)
         selected = stacked[:, :, self.source_start :: self.layer_stride]

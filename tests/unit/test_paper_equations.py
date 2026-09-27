@@ -16,10 +16,10 @@ def paper_pool(pool, states, rope, dummy):
     """Literal per-channel equations; no Router or KVPool forward methods."""
     states = torch.cat((dummy[None, None, None].expand(states.shape[0], 1, pool.num_layers, -1), states), 1)
     outputs = []
-    for branch in ('k', 'v'):
-        router = getattr(pool.mixer, f'{branch}_router')
+    for branch in ("k", "v"):
+        router = getattr(pool.mixer, f"{branch}_router")
         source = F.rms_norm(states, (pool.hidden_size,), eps=pool.rms_norm_eps)
-        source = source * getattr(pool, f'pre_mix_{branch}_weight')
+        source = source * getattr(pool, f"pre_mix_{branch}_weight")
         selected = sorted(range(pool.num_layers - 1, -1, -router.layer_stride))
         context = source[:, :, selected].flatten(2)
         weights = F.linear(context, router.linear.weight, router.linear.bias)
@@ -28,10 +28,10 @@ def paper_pool(pool, states, rope, dummy):
         for channel in range(pool.num_kv_channels):
             mixed = (source * weights[:, :, channel, :, None]).sum(2)
             mixed = F.rms_norm(mixed, (pool.hidden_size,), eps=pool.mix_norm_eps)
-            mixed = mixed * pool.post_mix[f'{branch}_gain'][channel]
-            projected = F.linear(mixed, getattr(pool, f'{branch}_proj_weight')[channel])
+            mixed = mixed * pool.post_mix[f"{branch}_gain"][channel]
+            projected = F.linear(mixed, getattr(pool, f"{branch}_proj_weight")[channel])
             projected = projected.unflatten(-1, (pool.num_key_value_heads, pool.head_dim)).transpose(1, 2)
-            if branch == 'k':
+            if branch == "k":
                 projected = F.rms_norm(projected, (pool.head_dim,), eps=pool.rms_norm_eps)
                 projected = projected * pool.k_norm_weight[channel]
                 first, second = projected.chunk(2, -1)
@@ -67,42 +67,53 @@ def paper_cyclic(block, x, documents, *, passes, gradient_passes, groups):
                 for index, layer in enumerate(block.layers):
                     fresh.append(hidden)
                     channel = index % block.num_kv_channels
-                    hidden = layer(hidden, key[:, channel], value[:, channel],
-                                   tuple(t[:, slots] for t in qrope), decode_key_mask=keep.unsqueeze(-3))
+                    hidden = layer(
+                        hidden,
+                        key[:, channel],
+                        value[:, channel],
+                        tuple(t[:, slots] for t in qrope),
+                        decode_key_mask=keep.unsqueeze(-3),
+                    )
                 states = states.index_copy(1, slots, torch.stack(fresh, 2))
                 output = output.index_copy(1, slots, hidden)
     return output
 
 
-@pytest.mark.parametrize('channels', [1, 2, 4])
-@pytest.mark.parametrize('packed', [False, True])
-@pytest.mark.parametrize('gradient_passes', [2, 3])
+@pytest.mark.parametrize("channels", [1, 2, 4])
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("gradient_passes", [2, 3])
 def test_cyclic_matches_paper_equations_and_all_gradients(channels, packed, gradient_passes):
     torch.manual_seed(608)
-    block = WhiteMatterBlock([
-        FeedbackDecoderLayer(16, WhiteMatterAttention(16, 2, 8), GatedMLP(16, 24)) for _ in range(4)
-    ], KVPool(16, 1, 8, 4, channels, router_layer_stride=2), RotaryEmbedding(8)).double()
+    block = WhiteMatterBlock(
+        [FeedbackDecoderLayer(16, WhiteMatterAttention(16, 2, 8), GatedMLP(16, 24)) for _ in range(4)],
+        KVPool(16, 1, 8, 4, channels, router_layer_stride=2),
+        RotaryEmbedding(8),
+    ).double()
     # Nonzero routing weights, normalization gains, and boundary states are
     # essential: step-zero priors alone cannot test content-dependent routing.
     with torch.no_grad():
         for parameter in block.parameters():
-            parameter.add_(torch.randn_like(parameter) * .03)
+            parameter.add_(torch.randn_like(parameter) * 0.03)
     reference = copy.deepcopy(block)
     inputs = torch.randn(2, 11, 16, dtype=torch.float64)
     probe = torch.randn_like(inputs)
-    documents = torch.tensor([[0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3],
-                              [0, 1, 1, 1, 2, 2, 3, 3, 3, 3, 4]]) if packed else None
+    documents = torch.tensor([[0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3], [0, 1, 1, 1, 2, 2, 3, 3, 3, 3, 4]]) if packed else None
     records = []
     # Disable compilation, but retain the production selective checkpoints so
     # their recomputation and all explicit document inputs are exercised.
-    with torch.compiler.set_stance('force_eager'):
+    with torch.compiler.set_stance("force_eager"):
         for current, manual in ((reference, True), (block, False)):
             x = inputs.clone().requires_grad_()
-            output = (paper_cyclic(current, x, documents, passes=3, gradient_passes=gradient_passes, groups=3)
-                      if manual else current(x, num_passes=3, num_gradient_passes=gradient_passes,
-                                             cyclic_groups=3, document_ids=documents)[0])
+            output = (
+                paper_cyclic(current, x, documents, passes=3, gradient_passes=gradient_passes, groups=3)
+                if manual
+                else current(
+                    x, num_passes=3, num_gradient_passes=gradient_passes, cyclic_groups=3, document_ids=documents
+                )[0]
+            )
             (output * probe).sum().backward()
             grads = {name: p.grad for name, p in current.named_parameters()}
-            assert x.grad is not None and all(g is not None for g in grads.values())
+            assert x.grad is not None
+            assert all(g is not None for g in grads.values())
             records.append((output.detach(), x.grad, grads))
     torch.testing.assert_close(*records, rtol=1e-9, atol=1e-9)

@@ -5,7 +5,6 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 
 import torch
 
-
 # Only changed by the inference-only precision scope; default training is unchanged.
 _FP32_INFERENCE = False
 
@@ -35,7 +34,11 @@ def fp32_inference() -> Iterator[None]:
 def residual_activation_dtype(device: torch.device | str, residual_dtype: str) -> torch.dtype:
     if residual_dtype not in {"fp32", "bf16"}:
         raise ValueError("residual_dtype must be 'fp32' or 'bf16'")
-    return torch.bfloat16 if not _FP32_INFERENCE and residual_dtype == "bf16" and torch.device(device).type == "cuda" else torch.float32
+    return (
+        torch.bfloat16
+        if not _FP32_INFERENCE and residual_dtype == "bf16" and torch.device(device).type == "cuda"
+        else torch.float32
+    )
 
 
 def model_autocast_context(device: torch.device | str) -> AbstractContextManager[None]:

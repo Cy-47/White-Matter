@@ -11,8 +11,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from benchmarks._measurement import checkpoint_files
-from evals.loading import load_complete_model
 from evals.execution import evaluate as evaluate_tokens
+from evals.loading import load_complete_model
 from training.data import TokenCacheDataset, load_cache_metadata
 from white_matter.models import register_models
 from white_matter.modules.precision import model_autocast_context

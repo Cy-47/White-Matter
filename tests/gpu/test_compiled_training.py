@@ -24,11 +24,11 @@ def test_compiled_training_preserves_loss_and_all_gradients(architecture):
     torch.manual_seed(71)
     exact_ar = architecture == "autoregressive"
     extra = (
-        dict(num_kv_channels=2, cyclic_groups=4, num_passes=3, router_layer_stride=2)
+        {"num_kv_channels": 2, "cyclic_groups": 4, "num_passes": 3, "router_layer_stride": 2}
         if architecture in {"white_matter", "autoregressive"}
-        else dict(num_kv_channels=1, num_passes=3, num_pre_layers=1, num_post_layers=1)
+        else {"num_kv_channels": 1, "num_passes": 3, "num_pre_layers": 1, "num_post_layers": 1}
         if architecture == "lckv"
-        else dict(num_kv_channels=None)
+        else {"num_kv_channels": None}
     )
     config = AutoConfig.for_model(
         "white_matter" if exact_ar else architecture,
@@ -41,7 +41,8 @@ def test_compiled_training_preserves_loss_and_all_gradients(architecture):
         num_key_value_heads=1,
         head_dim=96,
         max_position_embeddings=256,
-        eos_token_id=256, document_separator_token_id=256,
+        eos_token_id=256,
+        document_separator_token_id=256,
         **extra,
     )
     config._attn_implementation = "flash_attention_2"
@@ -78,7 +79,9 @@ def test_compiled_training_preserves_loss_and_all_gradients(architecture):
             else:
                 decoder = model.model.decoder
                 if exact_ar:
-                    hidden = decoder.block.forward_autoregressive(inputs, document_ids=segments, checkpoint_chunk_size=0)
+                    hidden = decoder.block.forward_autoregressive(
+                        inputs, document_ids=segments, checkpoint_chunk_size=0
+                    )
                 elif architecture == "white_matter":
                     hidden, _ = decoder.block.forward(
                         inputs, num_passes=3, num_gradient_passes=2, cyclic_groups=4, document_ids=segments
@@ -105,7 +108,12 @@ def test_compiled_training_preserves_loss_and_all_gradients(architecture):
     torch.testing.assert_close(actual[1], expected[1], rtol=2e-3, atol=2e-3)
     assert_close(actual[2], expected[2], rtol=5e-2, atol=2e-4, aggregate_rtol=3e-2, cosine=0.9995)
     assert_gradient_maps_close(
-        actual[3], expected[3], rtol=5e-2, atol=2e-4, aggregate_rtol=3e-2, cosine=0.9995,
+        actual[3],
+        expected[3],
+        rtol=5e-2,
+        atol=2e-4,
+        aggregate_rtol=3e-2,
+        cosine=0.9995,
     )
 
 
@@ -119,7 +127,8 @@ def test_ar_checkpoint_compilation_limit_preserves_training(monkeypatch, caplog,
         execution_mode="autoregressive",
         residual_dtype=residual_dtype,
         vocab_size=257,
-        eos_token_id=256, document_separator_token_id=256,
+        eos_token_id=256,
+        document_separator_token_id=256,
         hidden_size=192,
         intermediate_size=384,
         num_hidden_layers=4,
@@ -153,9 +162,7 @@ def test_ar_checkpoint_compilation_limit_preserves_training(monkeypatch, caplog,
             if reference:
                 patch.setattr(torch, "compile", limited_compile)
             compile_feedback(model, mode="default", ar_dynamic=True)
-            forward = compile_training_forward(
-                TrainingForward(model, checkpoint_chunk_size=16, external_ce=True)
-            )
+            forward = compile_training_forward(TrainingForward(model, checkpoint_chunk_size=16, external_ce=True))
             records = []
             for ids in batches:
                 model.zero_grad(set_to_none=True)

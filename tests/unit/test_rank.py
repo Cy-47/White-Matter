@@ -1,22 +1,21 @@
 """Architecture and recipe checks for the sequential Figure 7b suite."""
 
-from pathlib import Path
 import copy
+from pathlib import Path
 
 import pytest
 import torch
 from transformers import AutoModelForCausalLM
 
-from studies.rank.evaluate import validate_checkpoint
-from studies.rank.train import validate_recipe
 from studies.rank.depth_causal import register_model as register_depth_causal
-from training.optim import partition_optimizer_parameters
+from studies.rank.evaluate import validate_checkpoint
+from studies.rank.protocol import validate_recipe
 from training.forward import TrainingForward
+from training.optim import partition_optimizer_parameters
 from training.recipes import load_recipe
 from white_matter.models import register_models
 from white_matter.models.white_matter.configuration_white_matter import WhiteMatterConfig
 from white_matter.modules.routing import Router, _init_logits
-
 
 ROOT = Path("studies/rank/recipes")
 EXPECTED_COUNTS = {
@@ -47,7 +46,9 @@ def test_top_prior_and_static_router_preserve_bias_gradients():
     got_static = static(other)
     torch.testing.assert_close(got_dynamic, got_static)
     probe = torch.randn_like(got_dynamic)
-    dynamic_grads = torch.autograd.grad((got_dynamic * probe).sum(), (source, dynamic.linear.weight, dynamic.linear.bias))
+    dynamic_grads = torch.autograd.grad(
+        (got_dynamic * probe).sum(), (source, dynamic.linear.weight, dynamic.linear.bias)
+    )
     static_bias_grad = torch.autograd.grad((got_static * probe).sum(), static.linear.bias)
     torch.testing.assert_close(dynamic_grads[0], torch.zeros_like(dynamic_grads[0]))
     torch.testing.assert_close(dynamic_grads[2], static_bias_grad[0])
@@ -61,8 +62,14 @@ def test_all_sequential_rank_recipes_match_paper_parameter_counts():
     assert set(recipes) == {*EXPECTED_COUNTS, "vanilla"}
     reference = recipes["k16"]
     for arm, recipe in recipes.items():
-        assert (recipe.steps, recipe.global_batch_size, recipe.gradient_accumulation_steps, recipe.seed) == (20_000, 8, 1, 1337)
-        assert recipe.data == reference.data and recipe.optimizer == reference.optimizer
+        assert (recipe.steps, recipe.global_batch_size, recipe.gradient_accumulation_steps, recipe.seed) == (
+            20_000,
+            8,
+            1,
+            1337,
+        )
+        assert recipe.data == reference.data
+        assert recipe.optimizer == reference.optimizer
         if arm not in {"vanilla", "k16_depth_causal"}:
             assert (recipe.no_gradient_passes, recipe.gradient_passes) == (1, 2)
             assert (recipe.model.num_passes, recipe.model.cyclic_groups, recipe.model.router_layer_stride) == (3, 8, 2)
@@ -79,12 +86,22 @@ def test_all_sequential_rank_recipes_match_paper_parameter_counts():
 
 def _small_config(**extra):
     return WhiteMatterConfig(
-        vocab_size=101, hidden_size=32, intermediate_size=64,
-        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
-        head_dim=8, max_position_embeddings=64, rope_theta=10_000.0,
-        eos_token_id=100, document_separator_token_id=100,
-        num_kv_channels=2, num_passes=3, cyclic_groups=2,
-        router_layer_stride=1, router_prior="shifted_identity:0.25",
+        vocab_size=101,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        max_position_embeddings=64,
+        rope_theta=10_000.0,
+        eos_token_id=100,
+        document_separator_token_id=100,
+        num_kv_channels=2,
+        num_passes=3,
+        cyclic_groups=2,
+        router_layer_stride=1,
+        router_prior="shifted_identity:0.25",
         **extra,
     )
 
@@ -103,14 +120,13 @@ def test_static_model_bias_is_optimizer_owned_and_dynamic_weight_is_absent():
 
 def test_jacobi_model_trains_on_packed_documents_and_prefill_keeps_dummy_slot():
     register_models()
-    model = AutoModelForCausalLM.from_config(
-        _small_config(execution_mode="jacobi", prefill_mode="jacobi")
-    )
+    model = AutoModelForCausalLM.from_config(_small_config(execution_mode="jacobi", prefill_mode="jacobi"))
     ids = torch.tensor([[1, 2, 100, 3, 4]])
     loss = model(ids, labels=ids).loss
     loss.backward()
     router = model.model.decoder.block.kv_pool.mixer.k_router.linear
-    assert router.weight.grad is not None and torch.isfinite(router.weight.grad).all()
+    assert router.weight.grad is not None
+    assert torch.isfinite(router.weight.grad).all()
     model.eval()
     with torch.inference_mode():
         prefix = model(ids[:, :3], use_cache=True)
@@ -137,7 +153,9 @@ def test_jacobi_checkpoint_recomputation_matches_full_reference_gradients():
         output = runner(inputs, 3, 2, token_ids=ids, compute_ce=False)
         loss = runner(inputs, 3, 2, token_ids=ids, compute_ce=True)
         loss.backward()
-        gradients = {name: parameter.grad.clone() for name, parameter in model.named_parameters() if parameter.requires_grad}
+        gradients = {
+            name: parameter.grad.clone() for name, parameter in model.named_parameters() if parameter.requires_grad
+        }
         assert all(gradient is not None for gradient in gradients.values())
         return output.detach(), loss.detach(), inputs.grad.detach(), gradients
 

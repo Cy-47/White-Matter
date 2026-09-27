@@ -1,7 +1,7 @@
 """Persistent state correctness, including the real CUDA cyclic attention path."""
 
-import copy
 import contextlib
+import copy
 
 import pytest
 import torch
@@ -44,7 +44,8 @@ def make_model(device, *, k=2, surrounding=0, prefill="autoregressive", residual
         head_dim=64 if device == "cuda" else 16,
         max_position_embeddings=128,
         rope_theta=10_000.0,
-        eos_token_id=100, document_separator_token_id=100,
+        eos_token_id=100,
+        document_separator_token_id=100,
         pad_token_id=0,
         num_kv_channels=k,
         cyclic_groups=4,
@@ -68,15 +69,16 @@ def close(actual, expected, device):
 
 
 def close_kv(actual, expected, device):
-    if device == 'cpu':
+    if device == "cpu":
         return close(actual, expected, device)
     # Bound eager/compiled BF16 differences per tensor; relative elementwise
     # error near zero is unstable.
     for a, b in zip(actual, expected, strict=True):
-        assert a.shape == b.shape and a.dtype == b.dtype
+        assert a.shape == b.shape
+        assert a.dtype == b.dtype
         delta, reference = a.float() - b.float(), b.float()
-        assert delta.norm() <= .01 * reference.norm() + 1e-6
-        assert delta.abs().max() <= .02 * reference.abs().max() + 1e-6
+        assert delta.norm() <= 0.01 * reference.norm() + 1e-6
+        assert delta.abs().max() <= 0.02 * reference.abs().max() + 1e-6
 
 
 @pytest.mark.parametrize("surrounding", [0, 1])
@@ -149,10 +151,14 @@ def test_cyclic_export_matches_full_layout_and_continuation(device, k):
         q_rope, k_rope = block._prepare_rope(x, docs)
         schedule = _prepare_cyclic_groups(block, x.shape[1], 4, q_rope, k_rope, x.device, cache_rope=False)
         metadata = prepare_feedback_metadata(docs, schedule[0], x.shape[1])
-        K, V = block.kv_pool.project_sequence(x.unsqueeze(2).expand(-1, -1, block.num_layers, -1), k_rope, dummy_token=block.dummy_token)
+        K, V = block.kv_pool.project_sequence(
+            x.unsqueeze(2).expand(-1, -1, block.num_layers, -1), k_rope, dummy_token=block.dummy_token
+        )
         # Independent full-layout rollout retains the last token at every pass.
         for _ in range(3):
-            expected, K, V, _ = block.cyclic_pass(x, K, V, block.dummy_token.expand(x.shape[0], 1, -1), *schedule, metadata=metadata, consume_state=True)
+            expected, K, V, _ = block.cyclic_pass(
+                x, K, V, block.dummy_token.expand(x.shape[0], 1, -1), *schedule, metadata=metadata, consume_state=True
+            )
         actual, state = block(x, cyclic_groups=4, document_ids=docs, output_final_state=True)
         close(actual, expected, device)
         close(state, (K, V), device)
@@ -188,17 +194,24 @@ def test_short_block_matches_explicit_padding_and_all_gradients(device, k, packe
                 block_docs = torch.cat((docs, (docs[:, -1:] + 1).expand(-1, 5)), dim=1)
         with model_autocast_context(device):
             hidden, state = current(
-                block_x, cyclic_groups=4, num_passes=3, num_gradient_passes=2,
-                attention_mask=mask if padded else None, document_ids=block_docs, output_final_state=True,
+                block_x,
+                cyclic_groups=4,
+                num_passes=3,
+                num_gradient_passes=2,
+                attention_mask=mask if padded else None,
+                document_ids=block_docs,
+                output_final_state=True,
             )
             assert state is not None
             if not padded:
-                assert hidden.shape[1] == 3 and all(t.shape[-2] == 4 for t in state)
+                assert hidden.shape[1] == 3
+                assert all(t.shape[-2] == 4 for t in state)
             hidden, state = hidden[:, :3], tuple(t[..., :4, :] for t in state)
             loss = hidden.float().square().mean() + sum(t.float().square().mean() for t in state)
         loss.backward()
         gradients = {name: p.grad for name, p in current.named_parameters() if p.requires_grad}
-        assert x.grad is not None and all(g is not None and torch.isfinite(g).all() for g in gradients.values())
+        assert x.grad is not None
+        assert all(g is not None and torch.isfinite(g).all() for g in gradients.values())
         results.append((hidden.detach(), tuple(t.detach() for t in state), x.grad, gradients))
     torch.testing.assert_close(*results, rtol=0, atol=0)
 
@@ -208,7 +221,7 @@ def test_short_block_matches_explicit_padding_and_all_gradients(device, k, packe
 def test_hf_generation_reuses_cache_and_reorders_documents(device, beams):
     model = make_model(device, surrounding=1)
     ids = torch.tensor([[2, 100, 3], [4, 5, 6]], device=device)
-    options = dict(max_new_tokens=3, do_sample=False, num_beams=beams)
+    options = {"max_new_tokens": 3, "do_sample": False, "num_beams": beams}
     expected = model.generate(ids, use_cache=False, **options)
     calls = []
     handle = model.model.decoder.register_forward_pre_hook(lambda module, args: calls.append(args[0].shape[1]))
@@ -217,7 +230,8 @@ def test_hf_generation_reuses_cache_and_reorders_documents(device, beams):
     finally:
         handle.remove()
     torch.testing.assert_close(actual, expected)
-    assert calls[0] == 3 and all(length == 1 for length in calls[1:])
+    assert calls[0] == 3
+    assert all(length == 1 for length in calls[1:])
 
 
 @torch.no_grad()
@@ -252,7 +266,7 @@ def test_generation_accepts_an_existing_cache():
     model = make_model("cpu", surrounding=1)
     ids = torch.tensor([[2, 100, 3, 4]])
     cache = model(ids[:, :2], use_cache=True).past_key_values
-    options = dict(use_cache=True, max_new_tokens=2, do_sample=False)
+    options = {"use_cache": True, "max_new_tokens": 2, "do_sample": False}
     torch.testing.assert_close(model.generate(ids, past_key_values=cache, **options), model.generate(ids, **options))
     with pytest.raises(ValueError, match="single document"):
         model.generate(ids, cache_implementation="static", **options)
@@ -377,21 +391,21 @@ def test_flash_decoding_matches_masked_sdpa_without_expanding_kv(monkeypatch, pr
     assert len(calls) == 3 * model.config.num_hidden_layers
 
 
-def inference_model(device, family, surrounding=0, prefill='cyclic', k=2):
+def inference_model(device, family, surrounding=0, prefill="cyclic", k=2):
     model = make_model(device, surrounding=surrounding, prefill=prefill, k=k)
-    if family == 'vanilla':
+    if family == "vanilla":
         config = model.config.to_dict()
-        config.pop('model_type')
-        config = AutoConfig.for_model('vanilla', **config)
-        config._attn_implementation = 'flash_attention_2' if device == 'cuda' else 'sdpa'
+        config.pop("model_type")
+        config = AutoConfig.for_model("vanilla", **config)
+        config._attn_implementation = "flash_attention_2" if device == "cuda" else "sdpa"
         model = AutoModelForCausalLM.from_config(config).to(device).eval()
     model.config.document_separator_token_id = None
     return model
 
 
-@pytest.mark.parametrize('family', ['vanilla', 'white_matter'])
-@pytest.mark.parametrize('surrounding', [0, 1])
-@pytest.mark.parametrize('k', [1, 2, 4])
+@pytest.mark.parametrize("family", ["vanilla", "white_matter"])
+@pytest.mark.parametrize("surrounding", [0, 1])
+@pytest.mark.parametrize("k", [1, 2, 4])
 @torch.no_grad()
 def test_static_cache_matches_dynamic_and_preserves_prefix(device, family, surrounding, k, monkeypatch):
     model = inference_model(device, family, surrounding, k=k)
@@ -401,7 +415,7 @@ def test_static_cache_matches_dynamic_and_preserves_prefix(device, family, surro
     for start, end in ((0, 5), (5, 6), (6, 9)):
         expected = model(ids[:, start:end], past_key_values=dynamic, use_cache=True)
         with monkeypatch.context() as patch:
-            if device == 'cuda' and start:
+            if device == "cuda" and start:
                 import flash_attn
 
                 flash = flash_attn.flash_attn_with_kvcache
@@ -414,41 +428,48 @@ def test_static_cache_matches_dynamic_and_preserves_prefix(device, family, surro
                     assert key.shape[2] == model.config.num_key_value_heads
                     return flash(query, key, value, **kwargs)
 
-                patch.setattr(flash_attn, 'flash_attn_with_kvcache', read_cache)
+                patch.setattr(flash_attn, "flash_attn_with_kvcache", read_cache)
             actual = model(ids[:, start:end], past_key_values=static, use_cache=True)
         close(actual.logits, expected.logits, device)
         assert static.get_seq_length() == dynamic.get_seq_length() == end
         for a, b in zip(static.layers, dynamic.layers, strict=True):
-            close_kv((a.keys[..., :b.keys.shape[-2], :], a.values[..., :b.values.shape[-2], :]), (b.keys, b.values), device)
+            close_kv(
+                (a.keys[..., : b.keys.shape[-2], :], a.values[..., : b.values.shape[-2], :]), (b.keys, b.values), device
+            )
         if start == 0:
             pointers = [(layer.keys.data_ptr(), layer.values.data_ptr()) for layer in static.layers]
-            prefix = [(layer.keys[..., :5 + extra, :].clone(), layer.values[..., :5 + extra, :].clone())
-                      for layer, extra in zip(static.layers, static.prefix_slots, strict=True)]
+            prefix = [
+                (layer.keys[..., : 5 + extra, :].clone(), layer.values[..., : 5 + extra, :].clone())
+                for layer, extra in zip(static.layers, static.prefix_slots, strict=True)
+            ]
             for layer, extra in zip(static.layers, static.prefix_slots, strict=True):
-                layer.keys[..., 5 + extra:, :].fill_(float('nan'))
-                layer.values[..., 5 + extra:, :].fill_(float('nan'))
+                layer.keys[..., 5 + extra :, :].fill_(float("nan"))
+                layer.values[..., 5 + extra :, :].fill_(float("nan"))
     for layer, ptr, (key, value) in zip(static.layers, pointers, prefix, strict=True):
         assert (layer.keys.data_ptr(), layer.values.data_ptr()) == ptr
-        torch.testing.assert_close(layer.keys[..., :key.shape[-2], :], key, rtol=0, atol=0)
-        torch.testing.assert_close(layer.values[..., :value.shape[-2], :], value, rtol=0, atol=0)
-    if family == 'vanilla':
+        torch.testing.assert_close(layer.keys[..., : key.shape[-2], :], key, rtol=0, atol=0)
+        torch.testing.assert_close(layer.values[..., : value.shape[-2], :], value, rtol=0, atol=0)
+    if family == "vanilla":
         close(model(ids).logits[:, -3:], actual.logits, device)
-    with pytest.raises(ValueError, match='capacity'):
+    with pytest.raises(ValueError, match="capacity"):
         model(ids[:, :4], past_key_values=static, use_cache=True)
     static.reset()
     assert static.get_seq_length() == 0
-    close(model(ids[:, :5], past_key_values=static, use_cache=True).logits,
-          model(ids[:, :5], use_cache=True).logits, device)
+    close(
+        model(ids[:, :5], past_key_values=static, use_cache=True).logits,
+        model(ids[:, :5], use_cache=True).logits,
+        device,
+    )
 
 
-@pytest.mark.parametrize('family', ['vanilla', 'white_matter'])
+@pytest.mark.parametrize("family", ["vanilla", "white_matter"])
 @torch.no_grad()
 def test_static_hf_generation_and_pending_token(device, family):
-    model = inference_model(device, family, prefill='autoregressive')
+    model = inference_model(device, family, prefill="autoregressive")
     ids = torch.tensor([[2, 3, 100]], device=device)
-    options = dict(max_new_tokens=3, do_sample=False, eos_token_id=None, return_dict_in_generate=True)
+    options = {"max_new_tokens": 3, "do_sample": False, "eos_token_id": None, "return_dict_in_generate": True}
     dynamic = model.generate(ids, use_cache=True, **options)
-    static = model.generate(ids, use_cache=True, cache_implementation='static', **options)
+    static = model.generate(ids, use_cache=True, cache_implementation="static", **options)
     torch.testing.assert_close(static.sequences, dynamic.sequences)
     assert static.past_key_values.get_seq_length() == static.sequences.shape[1] - 1
     cache = dynamic.past_key_values
@@ -457,10 +478,10 @@ def test_static_hf_generation_and_pending_token(device, family):
     assert cache.get_seq_length() == dynamic.sequences.shape[1]
 
 
-@pytest.mark.parametrize('family', ['vanilla', 'white_matter'])
+@pytest.mark.parametrize("family", ["vanilla", "white_matter"])
 @torch.no_grad()
 def test_explicit_cached_positions_continue(device, family):
-    model = inference_model(device, family, prefill='autoregressive')
+    model = inference_model(device, family, prefill="autoregressive")
     ids = torch.tensor([[2, 3, 4, 5]], device=device)
     positions = torch.arange(7, 11, device=device)[None]
     reference = model(ids, use_cache=True, position_ids=positions).logits
@@ -471,17 +492,17 @@ def test_explicit_cached_positions_continue(device, family):
 
 
 @pytest.mark.gpu
-@pytest.mark.skipif(not torch.cuda.is_available(), reason='requires CUDA')
-@pytest.mark.parametrize('family', ['vanilla', 'white_matter'])
-@pytest.mark.parametrize('surrounding', [0, 1])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("family", ["vanilla", "white_matter"])
+@pytest.mark.parametrize("surrounding", [0, 1])
 @torch.no_grad()
 def test_decode_graph_changes_tokens_lengths_and_cache_contents(family, surrounding):
     from white_matter.models.generation import DecodeGraph
 
-    model = inference_model('cuda', family, surrounding)
+    model = inference_model("cuda", family, surrounding)
     cache = model.allocate_inference_cache(32)
     reference = model.allocate_inference_cache(32)
-    ids = torch.tensor([[2, 3, 4, 5, 6, 7, 8, 9], [10, 11, 12, 13, 14, 15, 16, 17]], device='cuda')
+    ids = torch.tensor([[2, 3, 4, 5, 6, 7, 8, 9], [10, 11, 12, 13, 14, 15, 16, 17]], device="cuda")
     model(ids, use_cache=True, past_key_values=cache)
     graph = DecodeGraph(model, cache)
     for prompt in (ids, ids.flip(1)[:, :5]):
@@ -492,61 +513,70 @@ def test_decode_graph_changes_tokens_lengths_and_cache_contents(family, surround
         for token in (ids[:, :1], ids[:, 3:4], ids[:, 6:7]):
             expected = model(token, past_key_values=reference, use_cache=True, logits_to_keep=1).logits
             actual = graph(token)
-            close(actual, expected, 'cuda')
+            close(actual, expected, "cuda")
             assert cache.get_seq_length() == reference.get_seq_length()
             torch.testing.assert_close(cache.position, reference.position)
             for a, b, extra in zip(cache.layers, reference.layers, cache.prefix_slots, strict=True):
                 end = cache.get_seq_length() + extra
-                close((a.keys[..., :end, :], a.values[..., :end, :]), (b.keys[..., :end, :], b.values[..., :end, :]), 'cuda')
-    cache.batch_select_indices(torch.tensor([1, 0], device='cuda'))
-    with pytest.raises(ValueError, match='storage changed'):
+                close(
+                    (a.keys[..., :end, :], a.values[..., :end, :]),
+                    (b.keys[..., :end, :], b.values[..., :end, :]),
+                    "cuda",
+                )
+    cache.batch_select_indices(torch.tensor([1, 0], device="cuda"))
+    with pytest.raises(ValueError, match="storage changed"):
         graph(ids[:, :1])
 
 
 @torch.no_grad()
 def test_dynamic_cache_adds_document_metadata_after_plain_prefix():
-    model = inference_model('cpu', 'white_matter', surrounding=1, prefill='autoregressive')
+    model = inference_model("cpu", "white_matter", surrounding=1, prefill="autoregressive")
     ids = torch.tensor([[2, 3, 4, 5, 6]])
     cache = model(ids[:, :2], use_cache=True).past_key_values
     result = model(ids[:, 2:], use_cache=True, past_key_values=cache, document_ids=torch.tensor([[0, 1, 1]]))
     expected = model(ids, document_ids=torch.tensor([[0, 0, 0, 1, 1]])).logits[:, 2:]
-    close(result.logits, expected, 'cpu')
+    close(result.logits, expected, "cpu")
 
 
-@pytest.mark.parametrize('prefill', ['cyclic', 'jacobi'])
+@pytest.mark.parametrize("prefill", ["cyclic", "jacobi"])
 @torch.no_grad()
 def test_iterative_prefill_rejects_explicit_positions_without_mutating_cache(prefill):
-    model = inference_model('cpu', 'white_matter', prefill=prefill)
+    model = inference_model("cpu", "white_matter", prefill=prefill)
     cache = model.allocate_inference_cache(8)
-    with pytest.raises(ValueError, match='explicit position_ids'):
+    with pytest.raises(ValueError, match="explicit position_ids"):
         model(torch.tensor([[2, 3]]), use_cache=True, past_key_values=cache, position_ids=torch.tensor([[7, 8]]))
-    assert cache.seen_tokens == 0 and all(not layer.is_initialized for layer in cache.layers)
+    assert cache.seen_tokens == 0
+    assert all(not layer.is_initialized for layer in cache.layers)
 
 
 @torch.no_grad()
 def test_generation_preserves_explicit_positions_and_cyclic_policy():
     ids = torch.tensor([[2, 3, 4]])
     positions = torch.tensor([[7, 8, 9]])
-    model = inference_model('cpu', 'white_matter', prefill='autoregressive')
+    model = inference_model("cpu", "white_matter", prefill="autoregressive")
     first = model(ids, use_cache=True, position_ids=positions).logits[:, -1].argmax(-1)
     generated = model.generate(ids, use_cache=True, max_new_tokens=1, position_ids=positions)
     torch.testing.assert_close(generated[:, -1], first)
-    model.config.prefill_mode = 'cyclic'
+    model.config.prefill_mode = "cyclic"
     dynamic = model.generate(ids, use_cache=True, max_new_tokens=3, eos_token_id=None)
-    static = model.generate(ids, use_cache=True, max_new_tokens=3, eos_token_id=None, cache_implementation='static')
+    static = model.generate(ids, use_cache=True, max_new_tokens=3, eos_token_id=None, cache_implementation="static")
     torch.testing.assert_close(static, dynamic)
 
 
-@pytest.mark.parametrize('family', ['vanilla', 'white_matter'])
+@pytest.mark.parametrize("family", ["vanilla", "white_matter"])
 @torch.no_grad()
 def test_explicit_positions_with_padding_continue_from_last_valid_token(device, family):
-    model = inference_model(device, family, prefill='autoregressive')
+    model = inference_model(device, family, prefill="autoregressive")
     model.config.document_separator_token_id = 100
     ids = torch.tensor([[2, 3, 4, 5], [6, 7, 8, 9]], device=device)
     reference = model(ids, use_cache=True, position_ids=torch.tensor([[7, 8, 9, 10]], device=device)).logits
     padded = torch.cat((ids[:, :2], torch.zeros_like(ids[:, :1])), dim=1)
-    first = model(padded, attention_mask=torch.tensor([[1, 1, 0], [1, 1, 0]], device=device),
-                  use_cache=True, position_ids=torch.tensor([[7, 8, 0]], device=device))
+    first = model(
+        padded,
+        attention_mask=torch.tensor([[1, 1, 0], [1, 1, 0]], device=device),
+        use_cache=True,
+        position_ids=torch.tensor([[7, 8, 0]], device=device),
+    )
     cache = first.past_key_values
     torch.testing.assert_close(cache.position, torch.full((2, 1), 9, device=device))
     last = model(ids[:, 2:], past_key_values=cache, use_cache=True).logits
@@ -554,22 +584,22 @@ def test_explicit_positions_with_padding_continue_from_last_valid_token(device, 
     torch.testing.assert_close(cache.position, torch.full((2, 1), 11, device=device))
 
 
-@pytest.mark.parametrize('family', ['white_matter', 'vanilla'])
+@pytest.mark.parametrize("family", ["white_matter", "vanilla"])
 @torch.no_grad()
 def test_batched_prefill_shares_cache_and_supports_refill_then_decode(device, family):
     from white_matter.models.generation import DecodeGraph, prefill
 
     model = inference_model(device, family, surrounding=1)
     # Cross pool-tile boundaries, with ragged groups and a final partial batch.
-    length = 521 if device == 'cuda' else 17
+    length = 521 if device == "cuda" else 17
     ids = (torch.arange(3 * length, device=device).reshape(3, length) % 98) + 1
     cache, reference = (model.allocate_inference_cache(length + 15) for _ in range(2))
     expected = model(ids, past_key_values=reference, use_cache=True, logits_to_keep=1).logits
     close(prefill(model, ids, cache, batch_size=2), expected, device)
     pointers = [(layer.keys.data_ptr(), layer.values.data_ptr()) for layer in cache.layers]
     graph = None
-    if device == 'cuda':
-        model.compile(options={'emulate_precision_casts': True, 'reorder_for_locality': False})
+    if device == "cuda":
+        model.compile(options={"emulate_precision_casts": True, "reorder_for_locality": False})
         graph = DecodeGraph(model, cache)
     for prompt in (ids, ids.flip(1)[:, :-4]):
         cache.reset()
@@ -583,26 +613,30 @@ def test_batched_prefill_shares_cache_and_supports_refill_then_decode(device, fa
             close_kv((actual.keys, actual.values), (target.keys, target.values), device)
         for token in ids[:, :3].split(1, dim=1):
             expected = model(token, past_key_values=reference, use_cache=True, logits_to_keep=1).logits
-            actual = (graph(token) if graph is not None else
-                      model(token, past_key_values=cache, use_cache=True, logits_to_keep=1).logits)
+            actual = (
+                graph(token)
+                if graph is not None
+                else model(token, past_key_values=cache, use_cache=True, logits_to_keep=1).logits
+            )
             close(actual, expected, device)
             torch.testing.assert_close(cache.position, reference.position)
             for a, b in zip(cache.layers, reference.layers, strict=True):
                 close_kv((a.keys, a.values), (b.keys, b.values), device)
 
 
-@pytest.mark.parametrize('family', ['white_matter', 'vanilla'])
+@pytest.mark.parametrize("family", ["white_matter", "vanilla"])
 @torch.no_grad()
 def test_repeat_prefix_and_position_restore_preserve_storage(family):
-    model = inference_model('cpu', family, surrounding=1, prefill='autoregressive')
+    model = inference_model("cpu", family, surrounding=1, prefill="autoregressive")
     ids = torch.tensor([[2, 3, 4]])
     prefix = model.allocate_inference_cache(9)
     model(ids, past_key_values=prefix, use_cache=True)
     cache = prefix.repeat_prefix(3, 7)
     reference = model.allocate_inference_cache(7)
     model(ids.expand(3, -1), past_key_values=reference, use_cache=True)
-    pointers = [(layer.keys.data_ptr(), layer.values.data_ptr(), layer.cumulative_length.data_ptr())
-                for layer in cache.layers]
+    pointers = [
+        (layer.keys.data_ptr(), layer.values.data_ptr(), layer.cumulative_length.data_ptr()) for layer in cache.layers
+    ]
     position_pointer = cache.position.data_ptr()
     snapshot = cache._snapshot_position()
     token = torch.tensor([[5], [6], [7]])
@@ -610,23 +644,25 @@ def test_repeat_prefix_and_position_restore_preserve_storage(family):
     for _ in range(2):
         cache._restore_position(snapshot)
         actual = model(token, past_key_values=cache, use_cache=True).logits
-        close(actual, expected, 'cpu')
+        close(actual, expected, "cpu")
         assert cache.position.data_ptr() == position_pointer
-        for layer, source, pointer, extra in zip(cache.layers, prefix.layers, pointers, cache.prefix_slots, strict=True):
+        for layer, source, pointer, extra in zip(
+            cache.layers, prefix.layers, pointers, cache.prefix_slots, strict=True
+        ):
             assert (layer.keys.data_ptr(), layer.values.data_ptr(), layer.cumulative_length.data_ptr()) == pointer
             end = ids.shape[1] + extra
             torch.testing.assert_close(layer.keys[..., :end, :], source.keys[..., :end, :].expand(3, -1, -1, -1))
             assert layer.keys.data_ptr() != source.keys.data_ptr()
     assert prefix.seen_tokens == 3
-    with pytest.raises(ValueError, match='single-row'):
+    with pytest.raises(ValueError, match="single-row"):
         cache.repeat_prefix(2, 7)
-    with pytest.raises(ValueError, match='capacity'):
+    with pytest.raises(ValueError, match="capacity"):
         prefix.repeat_prefix(2, 2)
 
 
 @torch.no_grad()
 def test_batch_views_commit_only_after_last_chunk_and_reset_after_failure():
-    model = inference_model('cpu', 'white_matter', prefill='autoregressive')
+    model = inference_model("cpu", "white_matter", prefill="autoregressive")
     cache = model.allocate_inference_cache(6)
     ids = torch.tensor([[2, 3], [4, 5], [6, 7]])
     with cache._prefill_batch(0, 2, batch_size=3) as chunk:
@@ -638,44 +674,51 @@ def test_batch_views_commit_only_after_last_chunk_and_reset_after_failure():
         model(ids[2:], past_key_values=chunk, use_cache=True)
     assert cache.seen_tokens == 2
     cache.reset()
-    with pytest.raises(RuntimeError, match='interrupted'):
+
+    def interrupted_prefill():
         with cache._prefill_batch(0, 2, batch_size=3) as chunk:
             model(ids[:2], past_key_values=chunk, use_cache=True)
-            raise RuntimeError('interrupted')
+            raise RuntimeError("interrupted")
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        interrupted_prefill()
     assert cache.seen_tokens == 0
     cache.reset()
     from white_matter.models.generation import prefill
 
-    close(prefill(model, ids, cache, batch_size=2), model(ids, use_cache=True, logits_to_keep=1).logits, 'cpu')
+    close(prefill(model, ids, cache, batch_size=2), model(ids, use_cache=True, logits_to_keep=1).logits, "cpu")
 
 
-@pytest.mark.parametrize('positions', [torch.tensor([[0, 1]]), torch.tensor([[0.0]])])
+@pytest.mark.parametrize("positions", [torch.tensor([[0, 1]]), torch.tensor([[0.0]])])
 @torch.no_grad()
 def test_invalid_cached_positions_do_not_mutate_document_state(positions):
-    model = make_model('cpu')
+    model = make_model("cpu")
     cache = model(torch.tensor([[2, 100, 3]]), use_cache=True).past_key_values
     reference = copy.deepcopy(cache)
     token = torch.tensor([[100]])
-    with pytest.raises(ValueError, match='position_ids'):
+    with pytest.raises(ValueError, match="position_ids"):
         model(token, past_key_values=cache, use_cache=True, position_ids=positions)
     assert cache.seen_tokens == reference.seen_tokens
-    for name in ('position', 'document_ids', 'last_document_id', 'next_document_id'):
+    for name in ("position", "document_ids", "last_document_id", "next_document_id"):
         torch.testing.assert_close(getattr(cache, name), getattr(reference, name), rtol=0, atol=0)
     for actual, expected in zip(cache.layers, reference.layers, strict=True):
         torch.testing.assert_close((actual.keys, actual.values), (expected.keys, expected.values), rtol=0, atol=0)
-    close(model(token, past_key_values=cache, use_cache=True).logits,
-          model(token, past_key_values=reference, use_cache=True).logits, 'cpu')
+    close(
+        model(token, past_key_values=cache, use_cache=True).logits,
+        model(token, past_key_values=reference, use_cache=True).logits,
+        "cpu",
+    )
 
 
 @pytest.mark.gpu
-@pytest.mark.skipif(not torch.cuda.is_available(), reason='requires CUDA')
-@pytest.mark.parametrize('failure_call', [2, 4], ids=['warmup', 'capture'])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("failure_call", [2, 4], ids=["warmup", "capture"])
 @torch.no_grad()
 def test_decode_capture_failure_restores_cache_position(failure_call):
     from white_matter.models.generation import DecodeGraph
 
-    model = inference_model('cuda', 'vanilla', prefill='autoregressive')
-    ids = torch.tensor([[2, 3, 4]], device='cuda')
+    model = inference_model("cuda", "vanilla", prefill="autoregressive")
+    ids = torch.tensor([[2, 3, 4]], device="cuda")
     cache = model.allocate_inference_cache(8)
     model(ids, past_key_values=cache, use_cache=True)
     reference = copy.deepcopy(cache)
@@ -685,20 +728,28 @@ def test_decode_capture_failure_restores_cache_position(failure_call):
         nonlocal calls
         calls += 1
         if calls == failure_call:
-            raise RuntimeError('recoverable setup failure')
+            raise RuntimeError("recoverable setup failure")
 
     handle = model.register_forward_hook(fail_after_forward)
     try:
-        with pytest.raises(RuntimeError, match='recoverable setup failure'):
+        with pytest.raises(RuntimeError, match="recoverable setup failure"):
             DecodeGraph(model, cache)
     finally:
         handle.remove()
-    assert calls == failure_call and cache.seen_tokens == reference.seen_tokens
+    assert calls == failure_call
+    assert cache.seen_tokens == reference.seen_tokens
     torch.testing.assert_close(cache.position, reference.position, rtol=0, atol=0)
     for actual, expected in zip(cache.layers, reference.layers, strict=True):
         torch.testing.assert_close(actual.cumulative_length, expected.cumulative_length, rtol=0, atol=0)
-        torch.testing.assert_close((actual.keys[..., :3, :], actual.values[..., :3, :]),
-                                   (expected.keys[..., :3, :], expected.values[..., :3, :]), rtol=0, atol=0)
-    token = torch.tensor([[5]], device='cuda')
-    close(model(token, past_key_values=cache, use_cache=True).logits,
-          model(token, past_key_values=reference, use_cache=True).logits, 'cuda')
+        torch.testing.assert_close(
+            (actual.keys[..., :3, :], actual.values[..., :3, :]),
+            (expected.keys[..., :3, :], expected.values[..., :3, :]),
+            rtol=0,
+            atol=0,
+        )
+    token = torch.tensor([[5]], device="cuda")
+    close(
+        model(token, past_key_values=cache, use_cache=True).logits,
+        model(token, past_key_values=reference, use_cache=True).logits,
+        "cuda",
+    )

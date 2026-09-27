@@ -17,8 +17,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from evals.execution import score_hidden
 from benchmarks._measurement import checkpoint_files
+from evals.execution import score_hidden
 from evals.loading import load_complete_model
 from training.data import load_cache_metadata, split_row_indices
 from training.precision import attention_kernel_context
@@ -72,8 +72,11 @@ def main() -> None:
     cache_meta = load_cache_metadata(args.data_dir)
     splits = cache_meta["splits"]
     indices = split_row_indices(
-        args.data_dir, "test", n_train=splits["n_train"],
-        n_val=splits["n_val"], n_test=splits["n_test"],
+        args.data_dir,
+        "test",
+        n_train=splits["n_train"],
+        n_val=splits["n_val"],
+        n_test=splits["n_test"],
     )
     if args.offset >= len(indices):
         raise ValueError("offset lies outside the test split")
@@ -91,8 +94,11 @@ def main() -> None:
     offset = args.offset
     while offset < stop:
         count = min(batch_size, stop - offset)
-        rows = np.array(tokens[indices.start + offset:indices.start + offset + count, :args.sequence_length],
-                        dtype=np.int64, copy=True)
+        rows = np.array(
+            tokens[indices.start + offset : indices.start + offset + count, : args.sequence_length],
+            dtype=np.int64,
+            copy=True,
+        )
         ids = torch.from_numpy(rows).to(device)
         hidden = None
         try:
@@ -112,22 +118,39 @@ def main() -> None:
         total_ce += ce
         total_tokens += count * (args.sequence_length - 1)
         offset += count
-        print(json.dumps({"done": offset - args.offset, "total": stop - args.offset,
-                          "batch": count, "ppl_running": math.exp(total_ce / total_tokens),
-                          "peak_gib": round(torch.cuda.max_memory_allocated() / 2**30, 2),
-                          "elapsed_s": round(time.monotonic() - started, 1)}), flush=True)
+        print(
+            json.dumps(
+                {
+                    "done": offset - args.offset,
+                    "total": stop - args.offset,
+                    "batch": count,
+                    "ppl_running": math.exp(total_ce / total_tokens),
+                    "peak_gib": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+                    "elapsed_s": round(time.monotonic() - started, 1),
+                }
+            ),
+            flush=True,
+        )
         del ids, rows, hidden
 
     result = {
         "checkpoint": checkpoint_files(str(args.model)),
         "model_config": model.config.to_dict(),
-        "model": str(args.model), "mode": args.mode, "model_type": model.config.model_type,
+        "model": str(args.model),
+        "mode": args.mode,
+        "model_type": model.config.model_type,
         "execution": "exact_token_serial_ar" if args.mode == "ar" else "checkpoint_configured",
-        "split": "test", "data_dir": str(args.data_dir), "offset": args.offset,
-        "sequences": stop - args.offset, "sequence_length": args.sequence_length,
-        "tokens": total_tokens, "batch_size_requested": args.batch_size,
-        "batch_size_final": batch_size, "ce_chunk": args.ce_chunk,
-        "cross_entropy_sum": total_ce, "cross_entropy": total_ce / total_tokens,
+        "split": "test",
+        "data_dir": str(args.data_dir),
+        "offset": args.offset,
+        "sequences": stop - args.offset,
+        "sequence_length": args.sequence_length,
+        "tokens": total_tokens,
+        "batch_size_requested": args.batch_size,
+        "batch_size_final": batch_size,
+        "ce_chunk": args.ce_chunk,
+        "cross_entropy_sum": total_ce,
+        "cross_entropy": total_ce / total_tokens,
         "perplexity": math.exp(total_ce / total_tokens),
         "elapsed_s": time.monotonic() - started,
     }

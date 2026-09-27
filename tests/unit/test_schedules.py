@@ -48,12 +48,22 @@ def test_fixed_pass_scorer_matches_direct_lm_ce_for_cyclic_and_jacobi():
     ids = torch.tensor([[1, 2, 100, 3, 4], [5, 100, 6, 7, 8]])
     loader = DataLoader([{"input_ids": row} for row in ids], batch_size=2)
     config = WhiteMatterConfig(
-        vocab_size=101, hidden_size=32, intermediate_size=64,
-        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
-        head_dim=8, max_position_embeddings=64, rope_theta=10_000.0,
-        eos_token_id=100, document_separator_token_id=100,
-        num_kv_channels=2, num_passes=2, cyclic_groups=2,
-        router_layer_stride=1, router_prior="shifted_identity:0.25",
+        vocab_size=101,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        max_position_embeddings=64,
+        rope_theta=10_000.0,
+        eos_token_id=100,
+        document_separator_token_id=100,
+        num_kv_channels=2,
+        num_passes=2,
+        cyclic_groups=2,
+        router_layer_stride=1,
+        router_prior="shifted_identity:0.25",
     )
     model = AutoModelForCausalLM.from_config(config).eval()
     for mode in ("cyclic", "jacobi"):
@@ -67,64 +77,100 @@ def test_fixed_pass_scorer_matches_direct_lm_ce_for_cyclic_and_jacobi():
             assert loss_sum / targets == pytest.approx(float(expected), abs=1e-5)
 
 
-@pytest.mark.parametrize('arm,horizon,crossing', [
-    ('ng4_g2_c4', 96, 36), ('ng4_g1_c8', 128, 105), ('ng4_g2_c16', 96, None),
-])
+@pytest.mark.parametrize(
+    ("arm", "horizon", "crossing"),
+    [
+        ("ng4_g2_c4", 96, 36),
+        ("ng4_g1_c8", 128, 105),
+        ("ng4_g2_c16", 96, None),
+    ],
+)
 def test_extended_schedule_aggregation(tmp_path, monkeypatch, arm, horizon, crossing):
     import json
+
     from studies.schedules import analyze
     from studies.schedules.matrix import arm_values, evaluation_horizon
 
     no_grad, grad, mode = arm_values(arm)
-    monkeypatch.setattr(analyze, 'NO_GRAD', (no_grad,))
-    monkeypatch.setattr(analyze, 'GRAD', (grad,))
-    monkeypatch.setattr(analyze, 'MODES', (mode,))
-    assert evaluation_horizon(arm, 'tp') == horizon
-    assert evaluation_horizon(arm, 'native') == evaluation_horizon(arm, 'cyclic16') == 32
+    monkeypatch.setattr(analyze, "NO_GRAD", (no_grad,))
+    monkeypatch.setattr(analyze, "GRAD", (grad,))
+    monkeypatch.setattr(analyze, "MODES", (mode,))
+    assert evaluation_horizon(arm, "tp") == horizon
+    assert evaluation_horizon(arm, "native") == evaluation_horizon(arm, "cyclic16") == 32
     for seed in SEEDS:
-        directory = tmp_path / f'seed{seed}' / arm
+        directory = tmp_path / f"seed{seed}" / arm
         directory.mkdir(parents=True)
-        for evaluation_mode in ('native', 'cyclic16', 'tp'):
-            count = horizon if evaluation_mode == 'tp' else 32
-            rows = [dict(n_passes=p, perplexity=(10 if evaluation_mode != 'tp' or
-                    (crossing is not None and p >= crossing) else 12)) for p in range(1, count + 1)]
-            (directory / f'eval_{evaluation_mode}.json').write_text(json.dumps(dict(
-                protocol='figure7a_sequential_final', seed=seed, arm=arm,
-                evaluation_mode=evaluation_mode, n_tok=analyze.PAPER_TEST_TARGETS, rows=rows,
-            )))
+        for evaluation_mode in ("native", "cyclic16", "tp"):
+            count = horizon if evaluation_mode == "tp" else 32
+            rows = [
+                {
+                    "n_passes": p,
+                    "perplexity": (10 if evaluation_mode != "tp" or (crossing is not None and p >= crossing) else 12),
+                }
+                for p in range(1, count + 1)
+            ]
+            (directory / f"eval_{evaluation_mode}.json").write_text(
+                json.dumps(
+                    {
+                        "protocol": "figure7a_sequential_final",
+                        "seed": seed,
+                        "arm": arm,
+                        "evaluation_mode": evaluation_mode,
+                        "n_tok": analyze.PAPER_TEST_TARGETS,
+                        "rows": rows,
+                    }
+                )
+            )
     per_seed, averaged = analyze.collect(tmp_path)
     for row in per_seed + averaged:
-        assert row['jacobi_passes_within_1pct'] == crossing
-        assert row['jacobi_max_evaluated_pass'] == horizon
-        assert row['jacobi_passes_within_1pct_censored'] == (crossing is None)
-        assert row['native_best_perplexity'] == row['cyclic16_pass32_perplexity'] == 10
-    path = tmp_path / 'seed1338' / arm / 'eval_tp.json'
+        assert row["jacobi_passes_within_1pct"] == crossing
+        assert row["jacobi_max_evaluated_pass"] == horizon
+        assert row["jacobi_passes_within_1pct_censored"] == (crossing is None)
+        assert row["native_best_perplexity"] == row["cyclic16_pass32_perplexity"] == 10
+    path = tmp_path / "seed1338" / arm / "eval_tp.json"
     payload = json.loads(path.read_text())
-    payload['rows'].append(dict(n_passes=horizon + 1, perplexity=10))
+    payload["rows"].append({"n_passes": horizon + 1, "perplexity": 10})
     path.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match='horizons differ'):
+    with pytest.raises(ValueError, match="horizons differ"):
         analyze.collect(tmp_path)
-    payload['rows'] = payload['rows'][:32]
+    payload["rows"] = payload["rows"][:32]
     path.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match='requires consecutive passes'):
+    with pytest.raises(ValueError, match="requires consecutive passes"):
         analyze.collect(tmp_path)
 
 
-@pytest.mark.parametrize('mode,last_pass,accepted', [('tp', 105, True), ('tp', 128, True),
-                                                   ('native', 105, False), ('cyclic16', 96, False)])
+@pytest.mark.parametrize(
+    ("mode", "last_pass", "accepted"),
+    [("tp", 105, True), ("tp", 128, True), ("native", 105, False), ("cyclic16", 96, False)],
+)
 def test_schedule_cli_extended_pass_range(monkeypatch, tmp_path, mode, last_pass, accepted):
     import sys
+
     from studies.schedules import evaluate
 
     def stop_before_loading(_):
-        raise RuntimeError('range accepted')
+        raise RuntimeError("range accepted")
 
-    monkeypatch.setattr(evaluate, 'validate_paper_cache', stop_before_loading)
-    monkeypatch.setattr(sys, 'argv', ['evaluate', '--model', 'unused', '--data-dir', str(tmp_path),
-                                    '--output', str(tmp_path / 'result.json'), '--mode', mode,
-                                    '--last-pass', str(last_pass)])
+    monkeypatch.setattr(evaluate, "validate_paper_cache", stop_before_loading)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evaluate",
+            "--model",
+            "unused",
+            "--data-dir",
+            str(tmp_path),
+            "--output",
+            str(tmp_path / "result.json"),
+            "--mode",
+            mode,
+            "--last-pass",
+            str(last_pass),
+        ],
+    )
     if accepted:
-        with pytest.raises(RuntimeError, match='range accepted'):
+        with pytest.raises(RuntimeError, match="range accepted"):
             evaluate.main()
     else:
         with pytest.raises(SystemExit) as error:

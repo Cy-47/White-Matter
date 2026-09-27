@@ -69,7 +69,8 @@ def test_native_cast_cache_matches_reference_training(monkeypatch, architecture,
         num_key_value_heads=1,
         head_dim=96,
         max_position_embeddings=256,
-        eos_token_id=256, document_separator_token_id=256,
+        eos_token_id=256,
+        document_separator_token_id=256,
         num_kv_channels=2 if white_matter else 1,
         cyclic_groups=4 if white_matter else None,
         num_passes=4,
@@ -190,9 +191,8 @@ def test_standalone_rollout_preserves_bf16_without_outer_autocast(monkeypatch, s
             output = forward(x, num_passes=3, num_gradient_passes=2, document_ids=documents)
             if schedule == "cyclic":
                 output, _ = output
-            assert detached_dtypes and set(detached_dtypes) == {torch.bfloat16}, (
-                f"detached pass dtypes: {detached_dtypes}"
-            )
+            assert detached_dtypes, "detached pass was not observed"
+            assert set(detached_dtypes) == {torch.bfloat16}, f"detached pass dtypes: {detached_dtypes}"
             output.square().mean().backward()
             gradients = {name: p.grad for name, p in block.named_parameters()}
             assert all(gradient is not None for gradient in gradients.values())

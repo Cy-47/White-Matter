@@ -9,9 +9,9 @@ from white_matter.models import _qwen3 as qwen3
 from white_matter.modules import RotaryEmbedding
 from white_matter.modules.precision import cast_residual
 
-from ..modeling_base import DecoderForCausalLM, DecoderModel, DecoderPreTrainedModel
-from ..decoder_utils import prepare_decoder_inputs, prepare_attention_inputs, run_feedforward_layers
 from ..cache import DecoderCache
+from ..decoder_utils import prepare_attention_inputs, prepare_decoder_inputs, run_feedforward_layers
+from ..modeling_base import DecoderForCausalLM, DecoderModel, DecoderPreTrainedModel
 from .configuration_vanilla import VanillaConfig
 
 
@@ -52,8 +52,13 @@ class VanillaDecoder(DecoderPreTrainedModel):
         else:
             inputs_embeds = cast_residual(inputs_embeds, residual_dtype=self.config.residual_dtype)
         args = prepare_attention_inputs(
-            inputs_embeds, document_ids, self.rotary_emb, self.config._attn_implementation, position_ids,
-            past_key_values=past_key_values, attention_mask=attention_mask,
+            inputs_embeds,
+            document_ids,
+            self.rotary_emb,
+            self.config._attn_implementation,
+            position_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
         )
         return run_feedforward_layers(self.layers, inputs_embeds, **args)
 

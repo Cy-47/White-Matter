@@ -39,8 +39,9 @@ def execution(model, *, mode=None, passes=None, groups=None, precision="bf16"):
                     set_value(module, "attention_implementation", "sdpa")
                     set_value(module, "_force_jacobi_reference", True)
                     set_value(module, "_force_cyclic_reference", True)
-        with (fp32_inference() if precision == "fp32" else nullcontext()), (
-            sdpa_kernel(SDPBackend.MATH) if precision == "fp32" else nullcontext()
+        with (
+            fp32_inference() if precision == "fp32" else nullcontext(),
+            sdpa_kernel(SDPBackend.MATH) if precision == "fp32" else nullcontext(),
         ):
             yield
     finally:
@@ -54,8 +55,10 @@ def execution(model, *, mode=None, passes=None, groups=None, precision="bf16"):
 @torch.inference_mode()
 def score_hidden(hidden, ids, weight, chunk_size=256) -> float:
     scores, _ = score_tokens(
-        hidden[:, :-1].reshape(-1, hidden.shape[-1]), weight,
-        ids[:, 1:].reshape(-1), chunk_size=chunk_size,
+        hidden[:, :-1].reshape(-1, hidden.shape[-1]),
+        weight,
+        ids[:, 1:].reshape(-1),
+        chunk_size=chunk_size,
     )
     return float(-scores.double().sum())
 
@@ -73,12 +76,20 @@ def evaluate(model, loader, *, num_passes=None, loss_backend="torch", chunk_size
         hidden = model.model(ids, num_passes=num_passes, use_cache=False).last_hidden_state
         if loss_backend == "cce" and device.type == "cuda":
             from cut_cross_entropy import linear_cross_entropy
+
             from white_matter.modules.precision import model_autocast_context
 
             with model_autocast_context(device):
-                total += float(linear_cross_entropy(
-                    hidden, model.lm_head.weight, ids, shift=True, reduction="sum", impl="cce_exact",
-                ).double())
+                total += float(
+                    linear_cross_entropy(
+                        hidden,
+                        model.lm_head.weight,
+                        ids,
+                        shift=True,
+                        reduction="sum",
+                        impl="cce_exact",
+                    ).double()
+                )
         else:
             total += score_hidden(hidden, ids, model.lm_head.weight, chunk_size)
         count += ids.shape[0] * (ids.shape[1] - 1)

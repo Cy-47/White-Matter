@@ -60,7 +60,15 @@ class _OffloadedPackedARCheckpoint(torch.autograd.Function):
         # Function.forward has no tape: the shared driver writes a fixed-capacity
         # cache, while backward replay uses its differentiable functional appends.
         output, K_state, V_state = _forward_packed_chunk(
-            block, x, K_initial, V_initial, K_dummy, V_dummy, q_pos, valid_start, reset_after,
+            block,
+            x,
+            K_initial,
+            V_initial,
+            K_dummy,
+            V_dummy,
+            q_pos,
+            valid_start,
+            reset_after,
         )
 
         # One endpoint contains every earlier prefix.  Offload exactly once;

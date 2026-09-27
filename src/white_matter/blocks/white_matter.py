@@ -40,9 +40,7 @@ class WhiteMatterBlock(nn.Module):
         self.num_kv_channels = kv_pool.num_kv_channels
         self.num_passes = num_passes
         self.checkpoint_jacobi_passes = checkpoint_jacobi_passes
-        self._cyclic_schedule_cache: dict[
-            tuple[int, int, str], tuple[list[torch.Tensor], torch.Tensor]
-        ] = {}
+        self._cyclic_schedule_cache: dict[tuple[int, int, str], tuple[list[torch.Tensor], torch.Tensor]] = {}
         self._cyclic_rope_cache: dict[
             tuple[int, int, str, torch.dtype],
             tuple[list[tuple[torch.Tensor, torch.Tensor]], list[tuple[torch.Tensor, torch.Tensor]]],
@@ -91,8 +89,14 @@ class WhiteMatterBlock(nn.Module):
             slots = torch.arange(x_in.shape[1], device=x_in.device)
             metadata = prepare_feedback_metadata(document_ids, [slots], x_in.shape[1])[0]
         hidden, states = run_feedback_layers(
-            self.layers, x_in, keys, values, q_pos_emb,
-            document_ids=document_ids, metadata=metadata, jacobi=True,
+            self.layers,
+            x_in,
+            keys,
+            values,
+            q_pos_emb,
+            document_ids=document_ids,
+            metadata=metadata,
+            jacobi=True,
         )
         return torch.stack(states, dim=1), hidden
 
@@ -105,7 +109,10 @@ class WhiteMatterBlock(nn.Module):
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """Differentiable token sweep and functional append for recurrent training."""
         output, keys, values = self._run_token_layers(
-            x, state, self.rotary_emb(x, position_ids), attention_mask,
+            x,
+            state,
+            self.rotary_emb(x, position_ids),
+            attention_mask,
         )
         return output, (
             torch.cat((state[0], keys.transpose(0, 1)), dim=3),
@@ -155,7 +162,11 @@ class WhiteMatterBlock(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Read the committed KV channels, run the layers, and project the new token."""
         x, layer_inputs = run_feedback_layers(
-            self.layers, x, channels[0].unbind(1), channels[1].unbind(1), position_embeddings,
+            self.layers,
+            x,
+            channels[0].unbind(1),
+            channels[1].unbind(1),
+            position_embeddings,
             decode_key_mask=attention_mask,
             cache_seqlens=cache_seqlens,
         )
@@ -166,9 +177,7 @@ class WhiteMatterBlock(nn.Module):
         """Project the learned dummy token at position zero: (k,B,H,1,d)."""
         dummy = self.dummy_token.view(1, 1, -1).expand(batch_size, 1, -1)
         positions = torch.zeros(1, 1, device=dummy.device, dtype=torch.long)
-        return self.kv_pool.project_token(
-            [dummy] * self.num_layers, self.rotary_emb(dummy, positions)
-        )
+        return self.kv_pool.project_token([dummy] * self.num_layers, self.rotary_emb(dummy, positions))
 
     def forward_recurrent(
         self,
@@ -201,7 +210,8 @@ class WhiteMatterBlock(nn.Module):
             raise ValueError("initial_state must include the dummy token")
         prefix = keys.shape[-2]
         if document_ids is not None and (
-            document_ids.shape != (x.shape[0], prefix - 1 + x.shape[1]) or document_ids.dtype not in (torch.int32, torch.int64)
+            document_ids.shape != (x.shape[0], prefix - 1 + x.shape[1])
+            or document_ids.dtype not in (torch.int32, torch.int64)
         ):
             raise ValueError("document_ids must label the past and new token slots, excluding the dummy token")
         if document_ids is not None and position_ids is None:

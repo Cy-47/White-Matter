@@ -13,9 +13,7 @@ def test_checkpointed_loss_matches_dense_loss_and_all_gradients(bias):
     head = torch.nn.Linear(8, 13, bias=bias)
     labels = torch.randint(0, 13, (2, 7))
     actual = checkpointed_linear_cross_entropy(hidden, labels, head, token_chunk_size=3)
-    expected = torch.nn.functional.cross_entropy(
-        head(hidden[:, :-1]).reshape(-1, 13), labels[:, 1:].reshape(-1)
-    )
+    expected = torch.nn.functional.cross_entropy(head(hidden[:, :-1]).reshape(-1, 13), labels[:, 1:].reshape(-1))
     inputs = (hidden, *head.parameters())
     actual_gradients = torch.autograd.grad(actual, inputs)
     expected_gradients = torch.autograd.grad(expected, inputs)

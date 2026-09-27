@@ -16,7 +16,8 @@ def config():
         head_dim=8,
         max_position_embeddings=64,
         rope_theta=10_000.0,
-        eos_token_id=100, document_separator_token_id=100,
+        eos_token_id=100,
+        document_separator_token_id=100,
         num_kv_channels=2,
         cyclic_groups=2,
         num_passes=2,
@@ -53,18 +54,19 @@ def test_causal_lm_round_trip_preserves_weights_and_execution(tmp_path, executio
 @pytest.mark.parametrize("architecture", ["white_matter", "lckv", "vanilla", "fusedkv"])
 @pytest.mark.parametrize("causal_lm_export", [False, True])
 def test_backbone_auto_model_round_trip(tmp_path, architecture, causal_lm_export):
-    cfg = dict(
-        vocab_size=101,
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=4,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=8,
-        max_position_embeddings=64,
-        rope_theta=10_000.0,
-        eos_token_id=100, document_separator_token_id=100,
-    )
+    cfg = {
+        "vocab_size": 101,
+        "hidden_size": 32,
+        "intermediate_size": 64,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 8,
+        "max_position_embeddings": 64,
+        "rope_theta": 10_000.0,
+        "eos_token_id": 100,
+        "document_separator_token_id": 100,
+    }
     if architecture == "white_matter":
         cfg.update(num_kv_channels=2, cyclic_groups=2, num_passes=2)
     elif architecture == "lckv":

@@ -28,8 +28,11 @@ class SharedMixtureMixer(nn.Module):
     def __init__(self, num_layers: int, hidden_size: int, *, layer_stride: int, router_prior: str) -> None:
         super().__init__()
         self.router = Router(
-            num_layers, hidden_size, 1,
-            router_prior=router_prior, layer_stride=layer_stride,
+            num_layers,
+            hidden_size,
+            1,
+            router_prior=router_prior,
+            layer_stride=layer_stride,
         )
 
     def reset_parameters(self) -> None:
@@ -60,12 +63,21 @@ class SharedMixtureKVPool(KVPool):
         if router_dynamic is not True:
             raise ValueError("shared-mixture study requires a dynamic router")
         mixer = SharedMixtureMixer(
-            num_layers, hidden_size, layer_stride=router_layer_stride, router_prior=router_prior,
+            num_layers,
+            hidden_size,
+            layer_stride=router_layer_stride,
+            router_prior=router_prior,
         )
         super().__init__(
-            hidden_size, num_key_value_heads, head_dim, num_layers, num_kv_channels,
-            rms_norm_eps=rms_norm_eps, initializer_range=initializer_range,
-            router_prior=router_prior, router_layer_stride=router_layer_stride,
+            hidden_size,
+            num_key_value_heads,
+            head_dim,
+            num_layers,
+            num_kv_channels,
+            rms_norm_eps=rms_norm_eps,
+            initializer_range=initializer_range,
+            router_prior=router_prior,
+            router_layer_stride=router_layer_stride,
             mixer=mixer,
         )
         # The source entering K and V is literally the same tensor. Keeping the

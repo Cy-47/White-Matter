@@ -27,7 +27,10 @@ def prepare_cyclic_attention_metadata(
     """
     if query_document_ids.ndim != 2 or key_document_ids.ndim != 2:
         raise ValueError("segment IDs must have shape (batch, length)")
-    if query_document_ids.shape[0] != key_document_ids.shape[0] or min(*query_document_ids.shape, key_document_ids.shape[1]) < 1:
+    if (
+        query_document_ids.shape[0] != key_document_ids.shape[0]
+        or min(*query_document_ids.shape, key_document_ids.shape[1]) < 1
+    ):
         raise ValueError("segment IDs require matching nonempty batches and sequences")
     if query_document_ids.device != key_document_ids.device:
         raise ValueError("segment IDs must be on the same device")

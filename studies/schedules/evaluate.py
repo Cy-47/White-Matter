@@ -8,16 +8,18 @@ import math
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
 
 from studies.protocol import (
-    PAPER_SEQUENCE_LENGTH, PAPER_TEST_SEQUENCES, PAPER_TEST_TARGETS,
-    evaluate_fixed_passes, validate_paper_cache,
+    PAPER_SEQUENCE_LENGTH,
+    PAPER_TEST_TARGETS,
+    evaluate_fixed_passes,
+    paper_test_loader,
+    validate_final_checkpoint,
+    validate_paper_cache,
 )
 from studies.schedules.matrix import arm_values, evaluation_horizon, recipe_path, validate_recipe
-from training.data import TokenCacheDataset
 from training.precision import configure_precision
-from training.recipes import load_recipe, model_recipe_keys
+from training.recipes import load_recipe
 from white_matter.models import register_models
 
 
@@ -33,16 +35,7 @@ def validate_checkpoint(config) -> tuple[int, str]:
     arm_values(arm)
     recipe = load_recipe(recipe_path(seed, arm))
     validate_recipe(recipe, recipe_path(seed, arm))
-    expected = recipe.model
-    if config.model_type != expected.model_type:
-        raise ValueError("checkpoint family differs from its Figure 7a recipe")
-    for key in model_recipe_keys(type(expected)):
-        if key != "model_type" and getattr(config, key, None) != getattr(expected, key, None):
-            raise ValueError(f"checkpoint {key} differs from its Figure 7a recipe")
-    if getattr(config, "training_step", None) != 20_000:
-        raise ValueError("checkpoint must be the final 20,000-step model")
-    if getattr(config, "training_sequence_length", None) != PAPER_SEQUENCE_LENGTH:
-        raise ValueError("checkpoint must have been trained on 2048-token rows")
+    validate_final_checkpoint(config, recipe.model)
     return seed, arm
 
 
@@ -82,14 +75,7 @@ def main() -> None:
         from training.compile import compile_feedback
 
         compile_feedback(model, mode="default")
-    dataset = TokenCacheDataset(
-        args.data_dir, split="test", sequence_length=PAPER_SEQUENCE_LENGTH,
-        n_train=9_765_625, n_val=2_000, n_test=PAPER_TEST_SEQUENCES,
-    )
-    loader = DataLoader(
-        dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=2, pin_memory=device.type == "cuda",
-    )
+    loader = paper_test_loader(args.data_dir, batch_size=args.batch_size, device=device)
     original_mode, original_groups = model.config.execution_mode, model.config.cyclic_groups
     if args.mode == "cyclic16":
         model.config.execution_mode, model.config.cyclic_groups = "cyclic", 16
@@ -111,7 +97,7 @@ def main() -> None:
         "arm": arm,
         "checkpoint": str(args.model),
         "evaluation_mode": args.mode,
-        "n_seq": len(dataset),
+        "n_seq": len(loader.dataset),
         "n_tok": PAPER_TEST_TARGETS,
         "T": PAPER_SEQUENCE_LENGTH,
         "rows": rows,

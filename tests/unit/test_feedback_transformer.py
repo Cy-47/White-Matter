@@ -13,10 +13,17 @@ from white_matter.modules.rotary import rotate_half
 def _model():
     register_models()
     config = AutoConfig.for_model(
-        "feedback_transformer", vocab_size=97, eos_token_id=96,
-        hidden_size=32, intermediate_size=64, num_hidden_layers=3,
-        num_attention_heads=2, num_key_value_heads=1, head_dim=16,
-        max_position_embeddings=128, rope_theta=10000.0,
+        "feedback_transformer",
+        vocab_size=97,
+        eos_token_id=96,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=3,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=16,
+        max_position_embeddings=128,
+        rope_theta=10000.0,
         document_separator_token_id=None,
     )
     config._attn_implementation = "sdpa"
@@ -28,15 +35,20 @@ def _manual_block(block, x):
     keys = values = None
     outputs = []
     for t in range(x.shape[1]):
-        hidden = x[:, t:t + 1]
+        hidden = x[:, t : t + 1]
         states = [hidden]
         cosine, sine = block.rotary_emb(hidden, torch.full((x.shape[0], 1), t, device=x.device))
         for layer in block.layers:
             if keys is not None:
                 attn = layer.self_attn
-                query = attn.q_norm(attn.q_proj(layer.input_layernorm(hidden)).view(
-                    x.shape[0], 1, 2, 16,
-                )).transpose(1, 2)
+                query = attn.q_norm(
+                    attn.q_proj(layer.input_layernorm(hidden)).view(
+                        x.shape[0],
+                        1,
+                        2,
+                        16,
+                    )
+                ).transpose(1, 2)
                 query = query * cosine[:, None] + rotate_half(query) * sine[:, None]
                 score = query @ keys.repeat_interleave(2, dim=1).transpose(-2, -1) * attn.scaling
                 weights = score.float().softmax(-1).to(query.dtype)
@@ -44,9 +56,13 @@ def _manual_block(block, x):
                 hidden = hidden + attn.o_proj(context.transpose(1, 2).reshape(x.shape[0], 1, 32))
             hidden = hidden + layer.mlp(layer.post_attention_layernorm(hidden))
             states.append(hidden)
-        memory = torch.stack(states, dim=0).mul(
-            block.memory.layer_logits.softmax(0).view(-1, 1, 1, 1),
-        ).sum(0)
+        memory = (
+            torch.stack(states, dim=0)
+            .mul(
+                block.memory.layer_logits.softmax(0).view(-1, 1, 1, 1),
+            )
+            .sum(0)
+        )
         new_key = block.memory.key_norm(block.memory.key(memory).view(x.shape[0], 1, 1, 16)).transpose(1, 2)
         new_key = new_key * cosine[:, None] + rotate_half(new_key) * sine[:, None]
         new_value = block.memory.value(memory).view(x.shape[0], 1, 1, 16).transpose(1, 2)
@@ -71,8 +87,15 @@ def test_feedback_block_matches_independent_arithmetic_and_gradients():
         x = inputs.clone().requires_grad_()
         output, key, value = run(x)
         (output.square().mean() + key.square().mean() + value.square().mean()).backward()
-        rows.append((output.detach(), key.detach(), value.detach(), x.grad,
-                     {name: p.grad for name, p in block.named_parameters()}))
+        rows.append(
+            (
+                output.detach(),
+                key.detach(),
+                value.detach(),
+                x.grad,
+                {name: p.grad for name, p in block.named_parameters()},
+            )
+        )
     for left, right in zip(rows[0][:4], rows[1][:4], strict=True):
         torch.testing.assert_close(left, right, rtol=2e-5, atol=2e-6)
     for name, gradient in rows[0][4].items():
@@ -105,8 +128,11 @@ def test_last_logit_prefill_matches_full_output_and_cache():
         full = model(ids, past_key_values=full_cache, use_cache=True).logits
         last = model(ids, past_key_values=last_cache, use_cache=True, logits_to_keep=1).logits
     torch.testing.assert_close(last, full[:, -1:])
-    for left, right in zip((full_cache.layers[0].keys, full_cache.layers[0].values),
-                           (last_cache.layers[0].keys, last_cache.layers[0].values), strict=True):
+    for left, right in zip(
+        (full_cache.layers[0].keys, full_cache.layers[0].values),
+        (last_cache.layers[0].keys, last_cache.layers[0].values),
+        strict=True,
+    ):
         torch.testing.assert_close(left, right)
     assert last_cache.get_seq_length() == full_cache.get_seq_length() == 9
 
@@ -119,12 +145,17 @@ def test_document_cached_prefill_and_decode_match_independent_documents(packed):
     ids = torch.tensor([[1, 2, 3, 4, 5, 6]])
     documents = torch.tensor([[0, 0, 1, 1, 1, 2]]) if packed else torch.zeros_like(ids)
     ends = (0, 2, 5, 6) if packed else (0, 6)
-    expected = torch.cat([model(ids[:, start:end]).logits for start, end in zip(ends, ends[1:])], dim=1)
+    expected = torch.cat(
+        [model(ids[:, start:end]).logits for start, end in zip(ends[:-1], ends[1:], strict=True)], dim=1
+    )
     cache = model.allocate_inference_cache()
-    actual = torch.cat([
-        model(ids[:, start:end], document_ids=documents[:, start:end], past_key_values=cache).logits
-        for start, end in ((0, 3), (3, 4), (4, 6))
-    ], dim=1)
+    actual = torch.cat(
+        [
+            model(ids[:, start:end], document_ids=documents[:, start:end], past_key_values=cache).logits
+            for start, end in ((0, 3), (3, 4), (4, 6))
+        ],
+        dim=1,
+    )
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
 
 

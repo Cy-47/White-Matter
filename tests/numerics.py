@@ -21,15 +21,16 @@ def assert_close(
         relative_l2 = delta.norm() / reference.norm().clamp_min(torch.finfo(torch.float32).tiny)
         similarity = torch.nn.functional.cosine_similarity(actual.float().flatten(), reference, dim=0)
         reference_max = reference.abs().max()
-        assert (
+        if not (
             aggregate_rtol is not None
             and relative_l2 <= aggregate_rtol
             and similarity >= cosine
             and delta.abs().max() <= aggregate_rtol * reference_max + atol
-        ), (
-            f"max_abs={delta.abs().max().item():.6g}, relative_l2={relative_l2.item():.6g}, "
-            f"cosine={similarity.item():.6g}; {error}"
-        )
+        ):
+            raise AssertionError(
+                f"max_abs={delta.abs().max().item():.6g}, relative_l2={relative_l2.item():.6g}, "
+                f"cosine={similarity.item():.6g}; {error}"
+            ) from error
 
 
 def assert_gradient_maps_close(

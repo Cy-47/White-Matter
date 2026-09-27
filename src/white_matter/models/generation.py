@@ -54,7 +54,9 @@ class DecodeGraph:
             raise ValueError("decode capture requires flash_attention_2")
         self.model, self.cache = model, cache
         self.input_ids = torch.zeros_like(cache.position)
-        self._buffers = tuple(t for layer in cache.layers for t in (layer.keys, layer.values, layer.cumulative_length)) + (cache.position,)
+        self._buffers = tuple(
+            t for layer in cache.layers for t in (layer.keys, layer.values, layer.cumulative_length)
+        ) + (cache.position,)
         position = cache._snapshot_position()
 
         def forward():
@@ -80,12 +82,18 @@ class DecodeGraph:
 
     @torch.inference_mode()
     def __call__(self, input_ids: torch.Tensor) -> torch.Tensor:
-        if input_ids.shape != self.input_ids.shape or input_ids.device != self.input_ids.device or input_ids.dtype != torch.long:
+        if (
+            input_ids.shape != self.input_ids.shape
+            or input_ids.device != self.input_ids.device
+            or input_ids.dtype != torch.long
+        ):
             raise ValueError("decode input must match captured (B,1) int64 shape/device")
         if not 0 < self.cache.seen_tokens < self.cache.capacity:
             raise ValueError("prefill must leave room within the captured cache capacity")
         # Reorder/reset must not silently leave replay pointing at obsolete storage.
-        buffers = tuple(t for layer in self.cache.layers for t in (layer.keys, layer.values, layer.cumulative_length)) + (self.cache.position,)
+        buffers = tuple(
+            t for layer in self.cache.layers for t in (layer.keys, layer.values, layer.cumulative_length)
+        ) + (self.cache.position,)
         if any(a is not b for a, b in zip(self._buffers, buffers, strict=True)):
             raise ValueError("cache storage changed; recapture decoding")
         self.input_ids.copy_(input_ids)

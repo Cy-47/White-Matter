@@ -25,11 +25,13 @@ def _project_with_explicit_dummy(block):
 
 
 @pytest.mark.parametrize(
-    "channels,gradient_passes,device,residual_dtype,compiled",
+    ("channels", "gradient_passes", "device", "residual_dtype", "compiled"),
     [(k, passes, "cpu", "fp32", False) for k in (1, 2, 4) for passes in (1, 3)]
     + [
         pytest.param(k, passes, "cuda", dtype, False, marks=pytest.mark.gpu)
-        for k in (1, 2, 4) for passes in (1, 3) for dtype in ("fp32", "bf16")
+        for k in (1, 2, 4)
+        for passes in (1, 3)
+        for dtype in ("fp32", "bf16")
     ]
     + [pytest.param(2, 1, "cuda", dtype, True, marks=pytest.mark.gpu) for dtype in ("fp32", "bf16")],
 )
@@ -39,11 +41,22 @@ def test_dummy_projection_preserves_training(channels, gradient_passes, device, 
     configure_precision(device)
     torch.manual_seed(97)
     config = WhiteMatterConfig(
-        vocab_size=101, eos_token_id=100, document_separator_token_id=100, hidden_size=128, intermediate_size=192,
-        num_hidden_layers=6, num_pre_layers=1, num_post_layers=1,
-        num_attention_heads=2, num_key_value_heads=1, head_dim=64,
-        num_kv_channels=channels, cyclic_groups=4, num_passes=3,
-        router_layer_stride=2, residual_dtype=residual_dtype,
+        vocab_size=101,
+        eos_token_id=100,
+        document_separator_token_id=100,
+        hidden_size=128,
+        intermediate_size=192,
+        num_hidden_layers=6,
+        num_pre_layers=1,
+        num_post_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=64,
+        num_kv_channels=channels,
+        cyclic_groups=4,
+        num_passes=3,
+        router_layer_stride=2,
+        residual_dtype=residual_dtype,
     )
     config._attn_implementation = "flash_attention_2" if device == "cuda" else "sdpa"
     model = WhiteMatterForCausalLM(config).to(device).train()
@@ -80,6 +93,8 @@ def test_dummy_projection_preserves_training(channels, gradient_passes, device, 
     expected, actual = run(reference), run(model)
     # GPU reductions use BF16; keep the existing production gradient tolerances.
     torch.testing.assert_close(
-        actual, expected, rtol=5e-2 if device == "cuda" else 2e-5,
+        actual,
+        expected,
+        rtol=5e-2 if device == "cuda" else 2e-5,
         atol=2e-4 if device == "cuda" else 2e-6,
     )

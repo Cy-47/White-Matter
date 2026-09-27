@@ -6,10 +6,10 @@ import torch
 from torch import nn
 
 from white_matter.blocks.feedback_transformer import FeedbackMemory, FeedbackTransformerBlock
+from white_matter.layers.backends import pack_kv_cache
 from white_matter.models._qwen3 import make_feedback_layers
 from white_matter.modules import RotaryEmbedding
 from white_matter.modules.precision import cast_residual
-from white_matter.layers.backends import pack_kv_cache
 
 from ..cache import DecoderCache
 from ..decoder_utils import prepare_decoder_inputs
@@ -26,17 +26,26 @@ class FeedbackTransformerDecoder(DecoderPreTrainedModel):
         self.cache_prefix_slots = (0,)
         layers = nn.ModuleList(make_feedback_layers(config, config.num_hidden_layers, strict_causal=True))
         memory = FeedbackMemory(
-            config.hidden_size, config.num_hidden_layers,
-            config.num_key_value_heads, config.head_dim, config.rms_norm_eps,
+            config.hidden_size,
+            config.num_hidden_layers,
+            config.num_key_value_heads,
+            config.head_dim,
+            config.rms_norm_eps,
         )
         self.block = FeedbackTransformerBlock(layers, memory, RotaryEmbedding(config.head_dim, config.rope_theta))
         self.post_init()
 
     def forward(
-        self, inputs_embeds: torch.Tensor, *, num_passes: int | None = None,
-        num_gradient_passes: int | None = None, document_ids: torch.Tensor | None = None,
-        attention_mask: torch.Tensor | None = None, checkpoint_chunk_size: int = 0,
-        past_key_values: DecoderCache | None = None, position_ids: torch.Tensor | None = None,
+        self,
+        inputs_embeds: torch.Tensor,
+        *,
+        num_passes: int | None = None,
+        num_gradient_passes: int | None = None,
+        document_ids: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        checkpoint_chunk_size: int = 0,
+        past_key_values: DecoderCache | None = None,
+        position_ids: torch.Tensor | None = None,
         last_token_only: bool = False,
     ) -> torch.Tensor:
         if num_passes not in {None, 1} or num_gradient_passes not in {None, 1}:
@@ -49,7 +58,10 @@ class FeedbackTransformerDecoder(DecoderPreTrainedModel):
             if last_token_only:
                 raise ValueError("last_token_only requires cached inference")
             x, attention_mask, document_ids = prepare_decoder_inputs(
-                inputs_embeds, self.config, attention_mask, document_ids,
+                inputs_embeds,
+                self.config,
+                attention_mask,
+                document_ids,
             )
             return self.block.forward_reference(x, document_ids=document_ids, attention_mask=attention_mask)[0]
         x = cast_residual(inputs_embeds, residual_dtype=self.config.residual_dtype)
@@ -68,19 +80,25 @@ class FeedbackTransformerDecoder(DecoderPreTrainedModel):
                 keys, values = storage.keys, storage.values
                 lengths = cache.lengths(0, x.shape[0])
                 if document_ids is not None:
-                    prior = cache.document_ids[:, :seen + t]
-                    keep = prior == document_ids[:, t:t + 1]
+                    prior = cache.document_ids[:, : seen + t]
+                    keep = prior == document_ids[:, t : t + 1]
                     if x.is_cuda and self.config._attn_implementation == "flash_attention_2":
                         keys, values, lengths = pack_kv_cache(keys, values, keep)
                     else:
                         slots = torch.arange(keys.shape[-2], device=x.device)
                         keep = torch.nn.functional.pad(keep, (0, keys.shape[-2] - keep.shape[-1]))
                         keep = keep & (slots[None] < lengths[:, None])
-                        mask = x.new_zeros((x.shape[0], 1, 1, keys.shape[-2])).masked_fill(~keep[:, None, None], float("-inf"))
+                        mask = x.new_zeros((x.shape[0], 1, 1, keys.shape[-2])).masked_fill(
+                            ~keep[:, None, None], float("-inf")
+                        )
                         lengths = None
             out, key, value = self.block.token_step(
-                x[:, t:t + 1], keys, values, position_ids[:, t:t + 1],
-                key_mask=mask, cache_lengths=lengths,
+                x[:, t : t + 1],
+                keys,
+                values,
+                position_ids[:, t : t + 1],
+                key_mask=mask,
+                cache_lengths=lengths,
             )
             cache.update(key, value, 0)
             if outputs is not None:

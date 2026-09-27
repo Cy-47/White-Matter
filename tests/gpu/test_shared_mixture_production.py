@@ -22,10 +22,7 @@ def _run(model, ids, *, compiled):
     model.zero_grad(set_to_none=True)
     inputs = model.get_input_embeddings()(ids)
     inputs.retain_grad()
-    runner = (
-        compile_training_forward(TrainingForward(model))
-        if compiled else TrainingForward(model)
-    )
+    runner = compile_training_forward(TrainingForward(model)) if compiled else TrainingForward(model)
     with attention_kernel_context("cuda"), model_autocast_context("cuda"):
         hidden = runner(inputs, 3, 2, token_ids=ids, compute_ce=False)
         loss = runner(inputs, 3, 2, token_ids=ids)
@@ -46,12 +43,21 @@ def test_full_rank_shared_mixture_production_training_matches_independent_refere
     torch.manual_seed(627)
     config = AutoConfig.for_model(
         SharedMixtureConfig.model_type,
-        vocab_size=257, hidden_size=192, intermediate_size=384,
-        num_hidden_layers=16, num_attention_heads=2, num_key_value_heads=1,
-        head_dim=96, max_position_embeddings=256,
-        eos_token_id=256, document_separator_token_id=256,
-        num_kv_channels=16, num_passes=3, cyclic_groups=8,
-        router_layer_stride=2, residual_dtype="fp32",
+        vocab_size=257,
+        hidden_size=192,
+        intermediate_size=384,
+        num_hidden_layers=16,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=96,
+        max_position_embeddings=256,
+        eos_token_id=256,
+        document_separator_token_id=256,
+        num_kv_channels=16,
+        num_passes=3,
+        cyclic_groups=8,
+        router_layer_stride=2,
+        residual_dtype="fp32",
     )
     config._attn_implementation = "flash_attention_2"
     optimized = AutoModelForCausalLM.from_config(config).cuda().train()
@@ -76,5 +82,10 @@ def test_full_rank_shared_mixture_production_training_matches_independent_refere
     torch.testing.assert_close(actual[1], expected[1], rtol=2e-3, atol=2e-3)
     assert_close(actual[2], expected[2], rtol=1e-1, atol=2e-3, aggregate_rtol=3e-2, cosine=0.999)
     assert_gradient_maps_close(
-        actual[3], expected[3], rtol=1e-1, atol=2e-3, aggregate_rtol=3e-2, cosine=0.999,
+        actual[3],
+        expected[3],
+        rtol=1e-1,
+        atol=2e-3,
+        aggregate_rtol=3e-2,
+        cosine=0.999,
     )

@@ -58,7 +58,11 @@ class MetricsLogger:
         if self._file is not None:
             self._file.close()
         if self.path.exists():
-            kept = [line for line in self.path.read_text().splitlines() if line.strip() and _read_metric_step(line) < start_step]
+            kept = [
+                line
+                for line in self.path.read_text().splitlines()
+                if line.strip() and _read_metric_step(line) < start_step
+            ]
             self.path.write_text("\n".join(kept) + ("\n" if kept else ""))
         self._file = self.path.open("a", buffering=1)
 

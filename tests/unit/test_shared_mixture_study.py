@@ -6,9 +6,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from transformers import AutoConfig, AutoModelForCausalLM
 
+from studies.protocol import PAPER_TEST_TARGETS, validate_paper_cache
 from studies.shared_mixture.evaluate_heldout import evaluate_three_pass, validate_checkpoint
 from studies.shared_mixture.model import SharedMixtureConfig, SharedMixtureKVPool, register_model
-from studies.protocol import PAPER_TEST_TARGETS, validate_paper_cache
 from training.checkpoint import training_source_sha256
 from training.optim import partition_optimizer_parameters
 from training.recipes import load_recipe
@@ -22,21 +22,30 @@ def _manual_projection(pool, stacked):
     selected = source[:, :, pool.mixer.router.source_start :: pool.mixer.router.layer_stride]
     router_input = selected.reshape(B, T, -1)
     weights = F.linear(
-        router_input, pool.mixer.router.linear.weight, pool.mixer.router.linear.bias,
+        router_input,
+        pool.mixer.router.linear.weight,
+        pool.mixer.router.linear.bias,
     ).reshape(B, T, L)
     mixed = (source * weights[..., None]).sum(dim=2)
     mixed = F.rms_norm(mixed, (D,), None, pool.mix_norm_eps)
-    keys = torch.stack([
-        F.linear(mixed * pool.post_mix["k_gain"][channel], pool.k_proj_weight[channel])
-        for channel in range(pool.num_kv_channels)
-    ], dim=1)
-    values = torch.stack([
-        F.linear(mixed * pool.post_mix["v_gain"][channel], pool.v_proj_weight[channel])
-        for channel in range(pool.num_kv_channels)
-    ], dim=1)
+    keys = torch.stack(
+        [
+            F.linear(mixed * pool.post_mix["k_gain"][channel], pool.k_proj_weight[channel])
+            for channel in range(pool.num_kv_channels)
+        ],
+        dim=1,
+    )
+    values = torch.stack(
+        [
+            F.linear(mixed * pool.post_mix["v_gain"][channel], pool.v_proj_weight[channel])
+            for channel in range(pool.num_kv_channels)
+        ],
+        dim=1,
+    )
     return tuple(
         tensor.reshape(B, pool.num_kv_channels, T, pool.num_key_value_heads, pool.head_dim)
-        .permute(0, 1, 3, 2, 4).contiguous()
+        .permute(0, 1, 3, 2, 4)
+        .contiguous()
         for tensor in (keys, values)
     )
 
@@ -85,8 +94,10 @@ def test_study_recipe_is_trainable_and_matched_to_control():
     assert shared.model.model_type == SharedMixtureConfig.model_type
     assert (shared.steps, shared.global_batch_size, shared.data.sequence_length) == (20_000, 8, 2048)
     assert (shared.no_gradient_passes, shared.gradient_passes) == (1, 2)
-    assert shared.steps == control.steps and shared.global_batch_size == control.global_batch_size
-    assert shared.seed == control.seed and shared.optimizer == control.optimizer
+    assert shared.steps == control.steps
+    assert shared.global_batch_size == control.global_batch_size
+    assert shared.seed == control.seed
+    assert shared.optimizer == control.optimizer
     assert shared.model.num_kv_channels == control.model.num_kv_channels == 16
     assert shared.model.router_prior == "cyclic:0.25"
     assert control.model.router_prior == "shifted_identity:0.25"
@@ -101,8 +112,7 @@ def test_paper_shape_parameter_counts():
     register_model()
     expected = {"control": 131_846_656, "shared": 129_806_352}
     for arm, count in expected.items():
-        path = ("studies/rank/recipes/k16.yaml" if arm == "control"
-                else "studies/shared_mixture/recipes/shared_k16.yaml")
+        path = "studies/rank/recipes/k16.yaml" if arm == "control" else "studies/shared_mixture/recipes/shared_k16.yaml"
         config = load_recipe(path).model
         with torch.device("meta"):
             model = AutoModelForCausalLM.from_config(config)
@@ -114,11 +124,21 @@ def test_study_model_round_trips_with_registration(tmp_path):
     register_model()
     cfg = AutoConfig.for_model(
         SharedMixtureConfig.model_type,
-        vocab_size=101, hidden_size=32, intermediate_size=64,
-        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
-        head_dim=8, max_position_embeddings=64, rope_theta=10_000.0,
-        eos_token_id=100, document_separator_token_id=100,
-        num_kv_channels=2, num_passes=2, cyclic_groups=2, prefill_mode="cyclic",
+        vocab_size=101,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        max_position_embeddings=64,
+        rope_theta=10_000.0,
+        eos_token_id=100,
+        document_separator_token_id=100,
+        num_kv_channels=2,
+        num_passes=2,
+        cyclic_groups=2,
+        prefill_mode="cyclic",
     )
     model = AutoModelForCausalLM.from_config(cfg).eval()
     _, no_decay, muon = partition_optimizer_parameters(model)
@@ -145,11 +165,16 @@ def test_study_model_round_trips_with_registration(tmp_path):
 
 
 def test_study_rejects_non_full_rank_or_incompatible_prior():
-    base = dict(
-        vocab_size=101, hidden_size=32, intermediate_size=64,
-        num_hidden_layers=4, num_attention_heads=4, num_key_value_heads=2,
-        head_dim=8, eos_token_id=100,
-    )
+    base = {
+        "vocab_size": 101,
+        "hidden_size": 32,
+        "intermediate_size": 64,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 8,
+        "eos_token_id": 100,
+    }
     with pytest.raises(ValueError, match="one KV pair"):
         SharedMixtureConfig(**base, num_kv_channels=2)
     with pytest.raises(ValueError, match="equal-source"):
@@ -159,10 +184,18 @@ def test_study_rejects_non_full_rank_or_incompatible_prior():
 def test_three_pass_heldout_scores_only_the_final_state():
     register_model()
     cfg = SharedMixtureConfig(
-        vocab_size=101, hidden_size=32, intermediate_size=64,
-        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
-        head_dim=8, eos_token_id=100, document_separator_token_id=100,
-        num_passes=3, cyclic_groups=2, prefill_mode="cyclic",
+        vocab_size=101,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        eos_token_id=100,
+        document_separator_token_id=100,
+        num_passes=3,
+        cyclic_groups=2,
+        prefill_mode="cyclic",
     )
     model = AutoModelForCausalLM.from_config(cfg).eval()
     ids = torch.tensor([[1, 2, 100, 3, 4], [5, 100, 6, 7, 8]])

@@ -11,9 +11,19 @@ RECIPE = Path(__file__).parent / "recipes/exact_ar_4l.yaml"
 
 
 def schedules(modes):
-    return {mode: dict(partition="contiguous" if mode.startswith("contiguous") else
-                       "cyclic" if mode.startswith("cyclic") else "jacobi",
-                       groups=MODES[mode], update="after_group", version=1) for mode in modes}
+    return {
+        mode: {
+            "partition": "contiguous"
+            if mode.startswith("contiguous")
+            else "cyclic"
+            if mode.startswith("cyclic")
+            else "jacobi",
+            "groups": MODES[mode],
+            "update": "after_group",
+            "version": 1,
+        }
+        for mode in modes
+    }
 
 
 def validate_checkpoint(config):
@@ -21,8 +31,7 @@ def validate_checkpoint(config):
     for key in model_recipe_keys(type(recipe.model)):
         if getattr(config, key, None) != getattr(recipe.model, key, None):
             raise ValueError(f"convergence checkpoint differs from recipe: {key}")
-    for key, value in {"training_step": 800, "training_sequence_length": 1024,
-                       "recipe_name": recipe.name}.items():
+    for key, value in {"training_step": 800, "training_sequence_length": 1024, "recipe_name": recipe.name}.items():
         if getattr(config, key, None) != value:
             raise ValueError(f"convergence checkpoint {key} must be {value}")
 

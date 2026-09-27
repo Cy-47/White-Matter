@@ -1,4 +1,5 @@
 """Optional optimizations must preserve the complete feedback training gradient."""
+
 import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
@@ -15,10 +16,22 @@ pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(),
 
 def make_model(*, mode="cyclic", residual_dtype="fp32"):
     config = AutoConfig.for_model(
-        "white_matter", vocab_size=257, eos_token_id=256, document_separator_token_id=256, hidden_size=192, intermediate_size=384,
-        num_hidden_layers=4, num_attention_heads=2, num_key_value_heads=1, head_dim=96,
-        num_kv_channels=2, cyclic_groups=4, num_passes=3, router_layer_stride=2,
-        execution_mode=mode, residual_dtype=residual_dtype,
+        "white_matter",
+        vocab_size=257,
+        eos_token_id=256,
+        document_separator_token_id=256,
+        hidden_size=192,
+        intermediate_size=384,
+        num_hidden_layers=4,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=96,
+        num_kv_channels=2,
+        cyclic_groups=4,
+        num_passes=3,
+        router_layer_stride=2,
+        execution_mode=mode,
+        residual_dtype=residual_dtype,
     )
     config._attn_implementation = "flash_attention_2"
     return AutoModelForCausalLM.from_config(config).cuda().train()
@@ -26,8 +39,16 @@ def make_model(*, mode="cyclic", residual_dtype="fp32"):
 
 def make_optimizers(model, *, distributed=False, compiled=True):
     return build_optimizers(
-        model, base_lr=3e-4, weight_decay=.1, adam_beta1=.9, adam_beta2=.95,
-        muon_momentum=.95, muon_ns_steps=5, device="cuda", distributed_muon=distributed, compiled=compiled,
+        model,
+        base_lr=3e-4,
+        weight_decay=0.1,
+        adam_beta1=0.9,
+        adam_beta2=0.95,
+        muon_momentum=0.95,
+        muon_ns_steps=5,
+        device="cuda",
+        distributed_muon=distributed,
+        compiled=compiled,
     )
 
 
@@ -39,11 +60,15 @@ def training_step(model, runner, ids, *, cce=False, checkpointed=False):
         decoder_inputs = cast_residual(inputs, residual_dtype=model.config.residual_dtype)
         hidden = runner(decoder_inputs, 3, 2, token_ids=ids, compute_ce=False).detach().clone()
         value = runner(decoder_inputs, 3, 2, token_ids=ids)
-        loss = (cce_linear_cross_entropy(value, ids, model.lm_head) if cce else
-                checkpointed_linear_cross_entropy(value, ids, model.lm_head, token_chunk_size=16)
-                if checkpointed else value)
+        loss = (
+            cce_linear_cross_entropy(value, ids, model.lm_head)
+            if cce
+            else checkpointed_linear_cross_entropy(value, ids, model.lm_head, token_chunk_size=16)
+            if checkpointed
+            else value
+        )
     loss.backward()
-    record = dict(hidden=hidden, loss=loss.detach().clone(), input_grad=inputs.grad.detach().clone())
+    record = {"hidden": hidden, "loss": loss.detach().clone(), "input_grad": inputs.grad.detach().clone()}
     for name, parameter in model.named_parameters():
         assert parameter.grad is not None, name
         record[name] = parameter.grad.detach().clone()
@@ -60,8 +85,8 @@ def assert_training_close(actual, expected, *, exact=False):
         else:
             # Compare each gradient tensor, including near-zero/cancelling router entries.
             delta, ref = (value.double() - reference.double()), reference.double()
-            assert delta.norm() <= .025 * ref.norm() + 1e-7, (name, (delta.norm()/ref.norm()).item())
-            assert delta.abs().max() <= .05 * ref.abs().max() + 1e-6, name
+            assert delta.norm() <= 0.025 * ref.norm() + 1e-7, (name, (delta.norm() / ref.norm()).item())
+            assert delta.abs().max() <= 0.05 * ref.abs().max() + 1e-6, name
 
 
 def test_compiled_optimizer_preserves_training():
@@ -76,12 +101,13 @@ def test_compiled_optimizer_preserves_training():
         runners.append(torch.compile(TrainingForward(model), fullgraph=False, dynamic=False))
     for step in range(3):
         ids = torch.randint(0, 256, (2, 128), device="cuda")
-        ids[0, 3 + step::19] = ids[1, 7 + step::23] = 256
-        records = [training_step(model, runner, ids) for model, runner in zip(models, runners)]
+        ids[0, 3 + step :: 19] = ids[1, 7 + step :: 23] = 256
+        records = [training_step(model, runner, ids) for model, runner in zip(models, runners, strict=True)]
         assert_training_close(records[1], records[0], exact=True)
         for optimizer in optimizers:
-            set_learning_rate(optimizer, step=step + 1, total_steps=20,
-                              schedule="cosine", warmup_frac=.1, floor_frac=.1)
+            set_learning_rate(
+                optimizer, step=step + 1, total_steps=20, schedule="cosine", warmup_frac=0.1, floor_frac=0.1
+            )
             # Changing LR must not compile a new optimizer graph each update.
             with torch.compiler.set_stance("fail_on_recompile" if step else "default"):
                 step_optimizers(optimizer)
@@ -111,13 +137,16 @@ def test_optimizations_preserve_training(optimization, residual_dtype):
     length = 17 if checkpointed else 16 if graph else 128
     batches = [torch.randint(0, 256, (2, length), device="cuda") for _ in range(3)]
     for step, ids in enumerate(batches):
-        ids[0, [3+step, length-3]] = 256
-        ids[1, [1, length//2+step]] = 256
+        ids[0, [3 + step, length - 3]] = 256
+        ids[1, [1, length // 2 + step]] = 256
     runners = []
     for model in (reference, candidate):
         compile_feedback(model, mode="default", ar_dynamic=graph or checkpointed)
-        runner = TrainingForward(model, checkpoint_chunk_size=16 if checkpointed else 0,
-                                 external_ce=checkpointed or reference_cce or (cce and model is candidate))
+        runner = TrainingForward(
+            model,
+            checkpoint_chunk_size=16 if checkpointed else 0,
+            external_ce=checkpointed or reference_cce or (cce and model is candidate),
+        )
         if graph and model is candidate:
             dtype = torch.bfloat16 if residual_dtype == "bf16" else torch.float32
             with attention_kernel_context("cuda"):
@@ -129,7 +158,7 @@ def test_optimizations_preserve_training(optimization, residual_dtype):
             if graph:
                 # Large post-capture changes expose accidentally cached BF16 weights.
                 with torch.no_grad():
-                    reference.model.decoder.block.layers[0].self_attn.q_proj.weight.add_(.01)
+                    reference.model.decoder.block.layers[0].self_attn.q_proj.weight.add_(0.01)
             # Identical weights isolate the kernel error from trajectory divergence.
             candidate.load_state_dict(reference.state_dict())
             expected = training_step(reference, runners[0], ids, cce=reference_cce, checkpointed=checkpointed)
@@ -142,8 +171,10 @@ def test_optimizations_preserve_training(optimization, residual_dtype):
             # A shorter batch must take the ordinary decoder path.
             ids = batches[0][:1, :7]
             candidate.load_state_dict(reference.state_dict())
-            assert_training_close(training_step(candidate, runners[1], ids, cce=cce),
-                                  training_step(reference, runners[0], ids, cce=reference_cce))
+            assert_training_close(
+                training_step(candidate, runners[1], ids, cce=cce),
+                training_step(reference, runners[0], ids, cce=reference_cce),
+            )
     finally:
         torch.compiler.reset()
 
@@ -163,8 +194,8 @@ def test_cce_shift_and_gradients_match_fp64(bias, dtype):
     # through an autograd-tracked BF16 cast on the way back to FP32 masters.
     oracle = [t.detach().bfloat16().double().requires_grad_() for t in inputs]
     expected = torch.nn.functional.cross_entropy(
-        torch.nn.functional.linear(oracle[0][:, :-1], oracle[1],
-                                   oracle[2] if bias else None).flatten(0, 1), ids[:, 1:].flatten(),
+        torch.nn.functional.linear(oracle[0][:, :-1], oracle[1], oracle[2] if bias else None).flatten(0, 1),
+        ids[:, 1:].flatten(),
     )
     gradients = torch.autograd.grad(actual, inputs)
     reference = torch.autograd.grad(expected, oracle)

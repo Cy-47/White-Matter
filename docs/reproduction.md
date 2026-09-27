@@ -18,6 +18,12 @@ Run checkout commands from the repository root after installing the extras in
 [the main guide](../README.md). Activate that environment before submitting
 Slurm jobs. Pass your account, partition, and GPU type at submission time.
 
+Training automatically resumes an output directory containing `ckpt_full.pt`.
+If metrics or model exports exist without that checkpoint, choose a new output
+directory; training refuses to mix a fresh trajectory with existing artifacts.
+To resume an external checkpoint, pass `--resume-from-checkpoint` and a new
+output directory.
+
 CUDA study evaluators and recipes with `loss_backend: cce` also require the
 tested Cut Cross-Entropy revision, which provides `cce_exact`:
 

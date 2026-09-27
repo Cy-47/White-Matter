@@ -85,6 +85,7 @@ The [benchmark guide](benchmarks/README.md) covers training throughput, prefill,
 ```bash
 python -m pytest -m 'not gpu'
 ruff check src training evals examples benchmarks tests scripts studies
+ruff format --check src training evals examples benchmarks tests scripts studies
 ```
 
 GPU tests exercise the optional kernels and compiled execution. Run them on compatible hardware with the `gpu` extra installed.

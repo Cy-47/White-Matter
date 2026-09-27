@@ -5,7 +5,9 @@ only the trailing tokens for the next call.
 """
 
 from __future__ import annotations
-from typing import Iterable
+
+from collections.abc import Iterable
+
 import numpy as np
 
 

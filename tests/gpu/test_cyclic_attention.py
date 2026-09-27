@@ -17,14 +17,13 @@ def test_backward_preprocessing_matches_fp64(transposed, head_dim, query_length)
     torch.manual_seed(81)
     shape = (2, 3, query_length, head_dim)
     dout = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
-    out = torch.randn(
-        (2, query_length, 3, head_dim) if transposed else shape, device="cuda", dtype=torch.bfloat16
-    )
+    out = torch.randn((2, query_length, 3, head_dim) if transposed else shape, device="cuda", dtype=torch.bfloat16)
     if transposed:
         out = out.transpose(1, 2)
     actual = backward_preprocess(dout, out)
     expected = (dout.double() * out.double()).sum(-1)
-    assert actual.dtype == torch.float32 and actual.is_contiguous()
+    assert actual.dtype == torch.float32
+    assert actual.is_contiguous()
     # Bound FP32 reduction roundoff against the sum of absolute products,
     # including rows where positive and negative terms nearly cancel.
     bound = torch.finfo(torch.float32).eps * head_dim * (dout.double() * out.double()).abs().sum(-1)
@@ -61,8 +60,8 @@ def test_operator_outputs_and_all_input_gradients(documents, head_dim, gqa_ratio
 
 @pytest.mark.parametrize("documents", [False, True])
 def test_equal_scores_preserve_uniform_attention_across_tiles(documents):
-    q = torch.full((1, 2, 1, 128), 13., device="cuda", dtype=torch.bfloat16)
-    k = torch.full((1, 1, 4096, 128), 29., device="cuda", dtype=torch.bfloat16)
+    q = torch.full((1, 2, 1, 128), 13.0, device="cuda", dtype=torch.bfloat16)
+    k = torch.full((1, 1, 4096, 128), 29.0, device="cuda", dtype=torch.bfloat16)
     v = torch.ones_like(k)
     v[:, :, 2048:].neg_()
     metadata = None
@@ -73,23 +72,21 @@ def test_equal_scores_preserve_uniform_attention_across_tiles(documents):
         metadata = prepare_cyclic_attention_metadata(qseg, kseg)
     # All scores are equal and all keys visible: the signed values average to
     # exactly zero. Rescaling by anything other than one biases earlier tiles.
-    actual = cyclic_attention(q, k, v, query_stride=4096, query_offset=4095,
-                              metadata=metadata, backend="tilelang")
+    actual = cyclic_attention(q, k, v, query_stride=4096, query_offset=4095, metadata=metadata, backend="tilelang")
     torch.testing.assert_close(actual, torch.zeros_like(actual), rtol=0, atol=0)
 
 
-@pytest.mark.parametrize('element_stride', [1, 2])
+@pytest.mark.parametrize("element_stride", [1, 2])
 def test_native_cache_views_match_contiguous_attention_and_gradients(element_stride):
     torch.compiler.reset()
     torch.manual_seed(29)
-    q = torch.randn(2, 4, 33, 128, device='cuda', dtype=torch.bfloat16, requires_grad=True)
-    storage = [torch.randn(4, 3, 2, 145, 128 * element_stride, device='cuda', dtype=torch.bfloat16)
-               for _ in range(2)]
+    q = torch.randn(2, 4, 33, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    storage = [torch.randn(4, 3, 2, 145, 128 * element_stride, device="cuda", dtype=torch.bfloat16) for _ in range(2)]
     # Batch slice, channel selection, unused capacity and optional strided elements.
     k, v = [t[1:3, 1, :, :132, ::element_stride].detach().requires_grad_() for t in storage]
     assert not k.is_contiguous()
     attention = torch.compile(cyclic_attention, fullgraph=True)
-    options = dict(query_stride=4, query_offset=1, backend='tilelang')
+    options = {"query_stride": 4, "query_offset": 1, "backend": "tilelang"}
     expected = attention(q, k.contiguous(), v.contiguous(), **options)
     actual = attention(q, k, v, **options)
     probe = torch.randn_like(q)

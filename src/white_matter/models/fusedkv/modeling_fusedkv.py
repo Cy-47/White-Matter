@@ -17,10 +17,10 @@ import torch.nn as nn
 from white_matter.models import _qwen3 as qwen3
 from white_matter.modules import RotaryEmbedding
 from white_matter.modules.rotary import rotate_half
-from ..configuration_base import DecoderConfig
 
-from ..modeling_base import DecoderForCausalLM, DecoderModel, DecoderPreTrainedModel
+from ..configuration_base import DecoderConfig
 from ..decoder_utils import prepare_attention_inputs, prepare_decoder_inputs
+from ..modeling_base import DecoderForCausalLM, DecoderModel, DecoderPreTrainedModel
 from .configuration_fusedkv import FusedKVConfig
 
 
@@ -186,7 +186,8 @@ class FusedKVDecoder(DecoderPreTrainedModel):
             hidden_states, middle_key, middle_value = layer(hidden_states, **attention_kwargs)
             if layer_idx == 0:
                 bottom_key, bottom_value = middle_key, middle_value
-        assert bottom_key is not None and bottom_value is not None
+        assert bottom_key is not None
+        assert bottom_value is not None
         for layer, fusion in zip(self.reconstruction_layers, self.fusions, strict=True):
             key_states, value_states = fusion(bottom_key, middle_key, bottom_value, middle_value)
             hidden_states = layer(

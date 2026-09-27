@@ -109,7 +109,7 @@ def _get_kernel(kind, B, T_kv, HQ, HKV, D, Q_LEN, K_stride, block_M, key_strides
         block_N,
         stages,
         128,
-        **(dict(key_strides=key_strides, value_strides=value_strides) if kind == "fwd" else {}),
+        **({"key_strides": key_strides, "value_strides": value_strides} if kind == "fwd" else {}),
     )
     return tilelang.compile(
         program,
@@ -196,7 +196,9 @@ def cyclic_attn_bwd(
 
 
 @cyclic_attn_bwd.register_fake
-def _fake_bwd(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, *_: object, **__: object) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _fake_bwd(
+    Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, *_: object, **__: object
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # MUST mirror the real op's output metadata EXACTLY (contiguous, Q.dtype) —
     # see cyclic_attn_bwd, which does K = K.contiguous().to(Q.dtype) before
     # dK = empty_like(K). If the fake returned empty_like(original K/V) instead

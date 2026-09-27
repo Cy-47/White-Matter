@@ -19,24 +19,39 @@ from white_matter.models.lckv import LCKVConfig
 from white_matter.models.vanilla import VanillaConfig
 from white_matter.models.white_matter import WhiteMatterConfig
 
-
-SMALL = dict(hidden_size=512, intermediate_size=1536, num_hidden_layers=16,
-             num_attention_heads=6, num_key_value_heads=3, head_dim=96,
-             max_position_embeddings=4096, rope_theta=1_000_000.0,
-             document_separator_token_id=151643, residual_dtype="fp32")
-LARGE = dict(hidden_size=1792, intermediate_size=5376, num_hidden_layers=28,
-             num_attention_heads=14, num_key_value_heads=7, head_dim=128,
-             max_position_embeddings=32768, rope_theta=1_000_000.0,
-             document_separator_token_id=151643, residual_dtype="bf16")
+SMALL = {
+    "hidden_size": 512,
+    "intermediate_size": 1536,
+    "num_hidden_layers": 16,
+    "num_attention_heads": 6,
+    "num_key_value_heads": 3,
+    "head_dim": 96,
+    "max_position_embeddings": 4096,
+    "rope_theta": 1_000_000.0,
+    "document_separator_token_id": 151643,
+    "residual_dtype": "fp32",
+}
+LARGE = {
+    "hidden_size": 1792,
+    "intermediate_size": 5376,
+    "num_hidden_layers": 28,
+    "num_attention_heads": 14,
+    "num_key_value_heads": 7,
+    "head_dim": 128,
+    "max_position_embeddings": 32768,
+    "rope_theta": 1_000_000.0,
+    "document_separator_token_id": 151643,
+    "residual_dtype": "bf16",
+}
 SPECS = {
     "fusedkv_16l": (FusedKVConfig, SMALL, {}),
-    "lckv_w4": (LCKVConfig, SMALL, dict(num_passes=9, num_pre_layers=2, num_post_layers=2)),
-    "lckv_w7": (LCKVConfig, SMALL, dict(num_passes=9, num_pre_layers=3, num_post_layers=4)),
+    "lckv_w4": (LCKVConfig, SMALL, {"num_passes": 9, "num_pre_layers": 2, "num_post_layers": 2}),
+    "lckv_w7": (LCKVConfig, SMALL, {"num_passes": 9, "num_pre_layers": 3, "num_post_layers": 4}),
     "vanilla_24l": (VanillaConfig, {**SMALL, "num_hidden_layers": 24}, {}),
     "vanilla_28l": (VanillaConfig, LARGE, {}),
-    "white_matter_k14": (WhiteMatterConfig, LARGE,
-                         dict(num_kv_channels=14, num_passes=3, prefill_mode="cyclic")),
+    "white_matter_k14": (WhiteMatterConfig, LARGE, {"num_kv_channels": 14, "num_passes": 3, "prefill_mode": "cyclic"}),
 }
+
 
 def rename(name: str) -> str | None:
     name = name.replace("model.student.", "model.decoder.")
@@ -50,10 +65,12 @@ def rename(name: str) -> str | None:
         name = name.replace("mixer.router_K.head.linear", "mixer.k_router.linear")
         name = name.replace("mixer.router_V.head.linear", "mixer.v_router.linear")
         name = name.replace("block.sequence_seed", "block.dummy_token")
-        for old, new in (("fusedkv_k_old.weight", "k_bottom"),
-                         ("fusedkv_k_new.weight", "k_middle"),
-                         ("fusedkv_v_old.weight", "v_bottom"),
-                         ("fusedkv_v_new.weight", "v_middle")):
+        for old, new in (
+            ("fusedkv_k_old.weight", "k_bottom"),
+            ("fusedkv_k_new.weight", "k_middle"),
+            ("fusedkv_v_old.weight", "v_bottom"),
+            ("fusedkv_v_new.weight", "v_middle"),
+        ):
             name = name.replace(old, new)
     if name.endswith(("kv_pool.beta_temperature", "kv_pool.beta_basis_idx")):
         return None
@@ -80,8 +97,7 @@ def convert(label: str, source_path: Path, dest: Path, *, config=None) -> None:
     register_models()
     with torch.device("meta"):
         template = AutoModelForCausalLM.from_config(config)
-    expected = {k: tuple(v.shape) for k, v in template.state_dict().items()
-                if k != "lm_head.weight"}
+    expected = {k: tuple(v.shape) for k, v in template.state_dict().items() if k != "lm_head.weight"}
     mapped: dict[str, torch.Tensor] = {}
     ignored: list[str] = []
     for old_name, value in source.items():
@@ -107,8 +123,11 @@ def convert(label: str, source_path: Path, dest: Path, *, config=None) -> None:
         mapped[new_name] = value
     missing = sorted(set(expected) - set(mapped))
     unexpected = sorted(set(mapped) - set(expected))
-    wrong = [(k, tuple(mapped[k].shape), expected[k]) for k in expected.keys() & mapped.keys()
-             if tuple(mapped[k].shape) != expected[k]]
+    wrong = [
+        (k, tuple(mapped[k].shape), expected[k])
+        for k in expected.keys() & mapped.keys()
+        if tuple(mapped[k].shape) != expected[k]
+    ]
     if missing or unexpected or wrong:
         raise ValueError(f"{label}: missing={missing}, unexpected={unexpected}, wrong_shapes={wrong}")
     dest.mkdir(parents=True)

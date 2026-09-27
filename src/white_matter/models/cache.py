@@ -23,10 +23,12 @@ class DecoderCache(Cache):
             raise ValueError("max_cache_len must be positive")
         self.prefix_slots = prefix_slots
         self.capacity = max_cache_len
-        super().__init__(layers=[
-            DynamicLayer() if max_cache_len is None else StaticLayer(max_cache_len + extra)
-            for extra in prefix_slots
-        ])
+        super().__init__(
+            layers=[
+                DynamicLayer() if max_cache_len is None else StaticLayer(max_cache_len + extra)
+                for extra in prefix_slots
+            ]
+        )
         self.seen_tokens = 0
         self.position: torch.Tensor | None = None
         self.document_ids: torch.Tensor | None = None
@@ -69,7 +71,9 @@ class DecoderCache(Cache):
         if not initialized:
             # Infer owner dimensions from the first real chunk, as HF does.
             for target, source in zip(self.layers, chunk.layers, strict=True):
-                target.lazy_initialization(*(t[:1].expand(batch_size, -1, -1, -1) for t in (source.keys, source.values)))
+                target.lazy_initialization(
+                    *(t[:1].expand(batch_size, -1, -1, -1) for t in (source.keys, source.values))
+                )
                 target.keys[start:stop].copy_(source.keys)
                 target.values[start:stop].copy_(source.values)
             self.position = chunk.position.new_zeros((batch_size, 1))
@@ -81,8 +85,12 @@ class DecoderCache(Cache):
 
     def _snapshot_position(self) -> tuple:
         """Save static-cache positions for trials that leave the prefix unchanged."""
-        if (self.capacity is None or self.position is None or self.document_ids is not None
-                or not all(layer.is_initialized for layer in self.layers)):
+        if (
+            self.capacity is None
+            or self.position is None
+            or self.document_ids is not None
+            or not all(layer.is_initialized for layer in self.layers)
+        ):
             raise ValueError("position snapshots require an initialized single-document static cache")
         return self.seen_tokens, self.position.clone(), tuple(layer.cumulative_length.clone() for layer in self.layers)
 
@@ -97,7 +105,12 @@ class DecoderCache(Cache):
     @torch.no_grad()
     def repeat_prefix(self, batch_size: int, capacity: int) -> DecoderCache:
         """Copy one committed single-document prefix into independent static rows."""
-        if self.position is None or self.position.shape[0] != 1 or self.document_ids is not None or not self.seen_tokens:
+        if (
+            self.position is None
+            or self.position.shape[0] != 1
+            or self.document_ids is not None
+            or not self.seen_tokens
+        ):
             raise ValueError("repeat_prefix requires a single-row, single-document prefix")
         if batch_size < 1 or capacity < self.seen_tokens:
             raise ValueError("batch_size must be positive and capacity must fit the prefix")
@@ -112,10 +125,14 @@ class DecoderCache(Cache):
     def prepare(self, x, input_ids, attention_mask, document_ids, separator, position_ids):
         batch, length = x.shape[:2]
         if position_ids is not None and (
-            position_ids.shape not in {(1, length), (batch, length)} or position_ids.dtype not in (torch.int32, torch.int64)
+            position_ids.shape not in {(1, length), (batch, length)}
+            or position_ids.dtype not in (torch.int32, torch.int64)
         ):
             raise ValueError("position_ids must be integer (1,T) or (B,T)")
-        if attention_mask is not None and attention_mask.shape not in {(batch, length), (batch, self.seen_tokens + length)}:
+        if attention_mask is not None and attention_mask.shape not in {
+            (batch, length),
+            (batch, self.seen_tokens + length),
+        }:
             raise ValueError("attention_mask must cover the new tokens or full prefix")
         if self.capacity is not None:
             if self.seen_tokens + length > self.capacity:
@@ -130,12 +147,18 @@ class DecoderCache(Cache):
             self.position = torch.zeros((batch, 1), dtype=torch.long, device=x.device)
         if self.position.shape[0] != batch or self.position.device != x.device:
             raise ValueError("cache batch/device differs from inputs; reorder or reset the cache")
-        if (separator is None and document_ids is None and self.document_ids is None
-                and (attention_mask is None or bool(attention_mask.all()))):
+        if (
+            separator is None
+            and document_ids is None
+            and self.document_ids is None
+            and (attention_mask is None or bool(attention_mask.all()))
+        ):
             positions = self.position + torch.arange(length, device=x.device)
             documents, valid = None, None
         else:
-            documents, positions, valid = self.append_document_metadata(x, input_ids, attention_mask, document_ids, separator)
+            documents, positions, valid = self.append_document_metadata(
+                x, input_ids, attention_mask, document_ids, separator
+            )
         if position_ids is not None:
             positions = position_ids.to(x.device).expand(batch, -1)
         return documents, positions, valid
@@ -153,7 +176,9 @@ class DecoderCache(Cache):
     def lengths(self, layer_idx: int, batch_size: int) -> torch.Tensor:
         layer = self.layers[layer_idx]
         if self.capacity is not None:
-            return layer.cumulative_length.expand(batch_size).to(dtype=torch.int32, memory_format=torch.contiguous_format)
+            return layer.cumulative_length.expand(batch_size).to(
+                dtype=torch.int32, memory_format=torch.contiguous_format
+            )
         return torch.full((batch_size,), layer.keys.shape[-2], dtype=torch.int32, device=layer.keys.device)
 
     def append_document_metadata(
@@ -178,9 +203,12 @@ class DecoderCache(Cache):
             self.document_ids = torch.zeros((batch, seen), device=x.device, dtype=torch.long)
         elif self.document_ids.shape[0] != batch or self.document_ids.device != x.device:
             raise ValueError("cache batch/device differs from the inputs; reorder or reset the cache")
-        assert self.last_document_id is not None and self.next_document_id is not None
+        assert self.last_document_id is not None
+        assert self.next_document_id is not None
         separators = (
-            torch.zeros_like(valid) if input_ids is None or separator_token_id is None else (input_ids == separator_token_id) & valid
+            torch.zeros_like(valid)
+            if input_ids is None or separator_token_id is None
+            else (input_ids == separator_token_id) & valid
         ).long()
         if document_ids is None:
             documents = self.next_document_id + separators.cumsum(1) - separators

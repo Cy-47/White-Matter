@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 
-
 # Metadata fingerprints for the archived paper cache.
 _PAPER_METADATA_SHA256 = {
     "cache_meta.json": "bc97ff095a4df6d2d9f11e6e3ed0e8f9f33d7f7d6c25b927ed34a091a1ce8e36",
@@ -46,9 +45,15 @@ def validate_paper_training_recipe(recipe, expected_model) -> None:
     if recipe.data != DataRecipe("Qwen/Qwen3-0.6B-Base", PAPER_SEQUENCE_LENGTH, 151_643):
         raise ValueError("paper study data recipe differs from the fixed protocol")
     expected_optimizer = OptimizerRecipe(
-        learning_rate=3.0e-4, weight_decay=0.1, adam_beta1=0.9, adam_beta2=0.95,
-        muon_momentum=0.95, muon_ns_steps=5, warmup_fraction=0.02,
-        minimum_lr_fraction=0.1, max_gradient_norm=1.0,
+        learning_rate=3.0e-4,
+        weight_decay=0.1,
+        adam_beta1=0.9,
+        adam_beta2=0.95,
+        muon_momentum=0.95,
+        muon_ns_steps=5,
+        warmup_fraction=0.02,
+        minimum_lr_fraction=0.1,
+        max_gradient_norm=1.0,
     )
     if recipe.optimizer != expected_optimizer:
         raise ValueError("paper study optimizer differs from the fixed protocol")
@@ -68,11 +73,15 @@ def validate_paper_cache(cache_dir: str | Path) -> dict:
     if meta.get("build", {}).get("tool") == "prepare_fineweb_edu.py":
         total = 9_772_625
         expected = {
-            "n_total": total, "max_length": PAPER_SEQUENCE_LENGTH,
+            "n_total": total,
+            "max_length": PAPER_SEQUENCE_LENGTH,
             "model": "Qwen/Qwen3-0.6B-Base",
             "dataset": "karpathy/fineweb-edu-100b-shuffle",
-            "dataset_config": "", "dataset_split": "train", "text_field": "text",
-            "packing": "eos_crossdoc", "eos_id": 151_643,
+            "dataset_config": "",
+            "dataset_split": "train",
+            "text_field": "text",
+            "packing": "eos_crossdoc",
+            "eos_id": 151_643,
             "approx_train_tokens": 9_765_625 * PAPER_SEQUENCE_LENGTH,
         }
         for key, value in expected.items():
@@ -97,6 +106,42 @@ def validate_paper_cache(cache_dir: str | Path) -> dict:
     if tokenized.dtype != np.dtype("int32"):
         raise ValueError("paper cache tokenized.npy must contain int32 token IDs")
     return meta
+
+
+def paper_test_loader(cache_dir, *, batch_size: int, device):
+    """Build the common sequential full-test loader after cache validation."""
+    from torch.utils.data import DataLoader
+
+    from training.data import TokenCacheDataset
+
+    dataset = TokenCacheDataset(
+        cache_dir,
+        split="test",
+        sequence_length=PAPER_SEQUENCE_LENGTH,
+        n_train=9_765_625,
+        n_val=2_000,
+        n_test=PAPER_TEST_SEQUENCES,
+    )
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=device.type == "cuda",
+    )
+
+
+def validate_final_checkpoint(config, expected_model) -> None:
+    """Require the recipe's model and the final 20k-step training endpoint."""
+    from training.recipes import model_recipe_keys
+
+    for key in model_recipe_keys(type(expected_model)):
+        if getattr(config, key, None) != getattr(expected_model, key, None):
+            raise ValueError(f"checkpoint {key} differs from its recipe")
+    if getattr(config, "training_step", None) != 20_000:
+        raise ValueError("checkpoint must be the final 20,000-step model")
+    if getattr(config, "training_sequence_length", None) != PAPER_SEQUENCE_LENGTH:
+        raise ValueError("checkpoint must have been trained on 2048-token rows")
 
 
 def evaluate_fixed_passes(model, loader, *, num_passes: int) -> tuple[float, int]:

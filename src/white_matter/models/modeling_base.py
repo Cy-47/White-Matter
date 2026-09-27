@@ -12,8 +12,8 @@ from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutpu
 from white_matter.modules.documents import document_ids_from_eos
 from white_matter.modules.precision import model_autocast_context
 
-from .configuration_base import DecoderConfig
 from .cache import DecoderCache
+from .configuration_base import DecoderConfig
 
 
 class DecoderPreTrainedModel(PreTrainedModel):
@@ -96,19 +96,32 @@ class DecoderModel(DecoderPreTrainedModel):
                 raise ValueError("persistent caches are inference-only; use torch.no_grad() or inference_mode()")
             if past_key_values is None:
                 past_key_values = DecoderCache(self.decoder.cache_prefix_slots)
-            elif not isinstance(past_key_values, DecoderCache) or past_key_values.prefix_slots != self.decoder.cache_prefix_slots:
+            elif (
+                not isinstance(past_key_values, DecoderCache)
+                or past_key_values.prefix_slots != self.decoder.cache_prefix_slots
+            ):
                 raise TypeError("past_key_values must be a DecoderCache with this decoder's KV owners")
-        if position_ids is not None and use_cache and not past_key_values.get_seq_length() and getattr(
-            self.config, "prefill_mode", None
-        ) in {"cyclic", "jacobi"}:
-            raise ValueError("explicit position_ids require autoregressive prefill; iterative suffix prefill is not supported")
+        if (
+            position_ids is not None
+            and use_cache
+            and not past_key_values.get_seq_length()
+            and getattr(self.config, "prefill_mode", None) in {"cyclic", "jacobi"}
+        ):
+            raise ValueError(
+                "explicit position_ids require autoregressive prefill; iterative suffix prefill is not supported"
+            )
         if position_ids is not None and not use_cache:
             raise NotImplementedError("explicit position_ids currently require cached inference")
         if self.config.output_hidden_states if output_hidden_states is None else output_hidden_states:
             raise NotImplementedError("per-layer hidden states are not exposed for iterative decoders")
         if self.config.output_attentions if output_attentions is None else output_attentions:
             raise NotImplementedError("attention weights are not exposed by the production attention kernels")
-        if not use_cache and input_ids is not None and document_ids is None and self.config.document_separator_token_id is not None:
+        if (
+            not use_cache
+            and input_ids is not None
+            and document_ids is None
+            and self.config.document_separator_token_id is not None
+        ):
             document_ids = document_ids_from_eos(input_ids, self.config.document_separator_token_id)
         device = input_ids.device if input_ids is not None else inputs_embeds.device
         with model_autocast_context(device):
@@ -117,7 +130,12 @@ class DecoderModel(DecoderPreTrainedModel):
                 raise ValueError("inputs must have a nonempty batch/sequence/hidden layout")
             if use_cache:
                 documents, positions, valid = past_key_values.prepare(
-                    hidden, input_ids, attention_mask, document_ids, self.config.document_separator_token_id, position_ids
+                    hidden,
+                    input_ids,
+                    attention_mask,
+                    document_ids,
+                    self.config.document_separator_token_id,
+                    position_ids,
                 )
                 decoder_options = {"last_token_only": True} if last_token_only else {}
                 hidden = self.decoder(
@@ -131,7 +149,9 @@ class DecoderModel(DecoderPreTrainedModel):
                 )
                 past_key_values.advance(positions, valid)
             else:
-                hidden = self.decoder(hidden, attention_mask=attention_mask, document_ids=document_ids, num_passes=num_passes)
+                hidden = self.decoder(
+                    hidden, attention_mask=attention_mask, document_ids=document_ids, num_passes=num_passes
+                )
             hidden = self.norm(hidden.to(dtype=self.norm.weight.dtype))
         output = BaseModelOutputWithPast(last_hidden_state=hidden, past_key_values=past_key_values)
         return output if (self.config.return_dict if return_dict is None else return_dict) else output.to_tuple()
@@ -190,9 +210,12 @@ class DecoderForCausalLM(DecoderPreTrainedModel, GenerationMixin):
             use_cache=use_cache,
             output_hidden_states=output_hidden_states,
             output_attentions=output_attentions,
-            last_token_only=(isinstance(logits_to_keep, int) and logits_to_keep == 1
-                             and (past_key_values is not None or use_cache is True)
-                             and getattr(self.model.decoder, "supports_last_token_only", False)),
+            last_token_only=(
+                isinstance(logits_to_keep, int)
+                and logits_to_keep == 1
+                and (past_key_values is not None or use_cache is True)
+                and getattr(self.model.decoder, "supports_last_token_only", False)
+            ),
             return_dict=True,
         )
         hidden = outputs.last_hidden_state

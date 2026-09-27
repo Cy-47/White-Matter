@@ -26,8 +26,10 @@ def _read_curve(path: Path, seed: int, arm: str, mode: str) -> dict[int, float]:
     count = len(result["rows"])
     minimum = evaluation_horizon(arm, mode)
     if count < minimum or set(curve) != set(range(1, count + 1)) or (mode != "tp" and count != 32):
-        raise ValueError(f"Figure 7a {mode} curve requires consecutive passes from 1 through {minimum}"
-                         f"{' or beyond' if mode == 'tp' else ''}: {path}")
+        raise ValueError(
+            f"Figure 7a {mode} curve requires consecutive passes from 1 through {minimum}"
+            f"{' or beyond' if mode == 'tp' else ''}: {path}"
+        )
     if any(not math.isfinite(value) or value <= 0 for value in curve.values()):
         raise ValueError(f"invalid perplexity in {path}")
     return curve
@@ -54,13 +56,20 @@ def collect(root: Path) -> tuple[list[dict], list[dict]]:
         for grad in GRAD:
             for mode in MODES:
                 arm = f"ng{no_grad}_g{grad}_{mode}"
-                identity = dict(arm=arm, no_gradient_passes=no_grad, gradient_passes=grad, schedule=mode)
+                identity = {"arm": arm, "no_gradient_passes": no_grad, "gradient_passes": grad, "schedule": mode}
                 curves = []
                 for seed in SEEDS:
                     directory = root / f"seed{seed}" / arm
                     native = _read_curve(directory / "eval_native.json", seed, arm, "native")
-                    cyclic16 = native if mode == "c16" else _read_curve(
-                        directory / "eval_cyclic16.json", seed, arm, "cyclic16",
+                    cyclic16 = (
+                        native
+                        if mode == "c16"
+                        else _read_curve(
+                            directory / "eval_cyclic16.json",
+                            seed,
+                            arm,
+                            "cyclic16",
+                        )
                     )
                     tp_path = directory / "eval_tp.json"
                     tp = native if mode == "tp" and not tp_path.exists() else _read_curve(tp_path, seed, arm, "tp")

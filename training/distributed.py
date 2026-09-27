@@ -7,8 +7,8 @@ and reducing, then applies a final global clip before the optimizer update.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from datetime import timedelta
-from typing import Iterable
 
 import torch
 import torch.distributed as dist

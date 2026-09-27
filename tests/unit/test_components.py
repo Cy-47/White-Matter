@@ -3,6 +3,7 @@
 import copy
 import subprocess
 import sys
+
 import pytest
 import torch
 
@@ -18,10 +19,7 @@ def test_eager_jacobi_matches_sdpa_and_cannot_read_future_tokens():
     from white_matter.modules import GatedMLP, KVPool, RotaryEmbedding
 
     torch.manual_seed(73)
-    layers = [
-        FeedbackDecoderLayer(32, WhiteMatterAttention(32, 4, 8), GatedMLP(32, 64))
-        for i in range(2)
-    ]
+    layers = [FeedbackDecoderLayer(32, WhiteMatterAttention(32, 4, 8), GatedMLP(32, 64)) for i in range(2)]
     reference = WhiteMatterBlock(layers, KVPool(32, 2, 8, 2, 1), RotaryEmbedding(8)).double()
     eager = copy.deepcopy(reference)
     for layer in eager.layers:
@@ -75,7 +73,8 @@ def test_feedforward_layers_match_explicit_composition_and_all_gradients(executi
     torch.manual_seed(41)
     config = WhiteMatterConfig(
         vocab_size=101,
-        eos_token_id=100, document_separator_token_id=100,
+        eos_token_id=100,
+        document_separator_token_id=100,
         hidden_size=32,
         intermediate_size=64,
         num_attention_heads=4,
@@ -102,7 +101,9 @@ def test_feedforward_layers_match_explicit_composition_and_all_gradients(executi
             attention_args = prepare_attention_inputs(x, documents, decoder.rotary_emb, "sdpa")
             hidden = run_feedforward_layers(decoder.pre_layers, x, **attention_args)
             if execution_mode == "cyclic":
-                hidden, _ = decoder.block(hidden, cyclic_groups=2, num_passes=3, num_gradient_passes=2, document_ids=documents)
+                hidden, _ = decoder.block(
+                    hidden, cyclic_groups=2, num_passes=3, num_gradient_passes=2, document_ids=documents
+                )
             else:
                 hidden = decoder.block.forward_autoregressive(hidden, document_ids=documents)
             hidden = run_feedforward_layers(decoder.post_layers, hidden, **attention_args)
@@ -129,7 +130,7 @@ def test_block_rejects_invalid_iteration_counts(options):
 
     layers = [FeedbackDecoderLayer(32, WhiteMatterAttention(32, 4, 8), GatedMLP(32, 64))]
     block = WhiteMatterBlock(layers, KVPool(32, 2, 8, 1, 1), RotaryEmbedding(8, 10_000.0), num_passes=3)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=next(iter(options))):
         block(torch.randn(1, 16, 32), **options)
 
 
@@ -140,8 +141,7 @@ def test_lckv_block_initializes_and_trains_without_an_hf_owner():
     from white_matter.modules.routing import FixedSourceMixer
 
     layers = [
-        FeedbackDecoderLayer(32, WhiteMatterAttention(32, 4, 8, strict_causal=True), GatedMLP(32, 64))
-        for i in range(2)
+        FeedbackDecoderLayer(32, WhiteMatterAttention(32, 4, 8, strict_causal=True), GatedMLP(32, 64)) for i in range(2)
     ]
     pool = KVPool(32, 2, 8, 2, 1, mixer=FixedSourceMixer(2))
     block = LCKVBlock(layers, pool, RotaryEmbedding(8, 10_000.0), num_passes=3)
@@ -187,7 +187,7 @@ def test_inference_pool_bounds_projection_memory_and_preserves_positions(monkeyp
     torch.manual_seed(27)
     pool = KVPool(32, 2, 8, 4, 2).double()
     for parameter in pool.parameters():
-        parameter.add_(torch.randn_like(parameter) * .02)
+        parameter.add_(torch.randn_like(parameter) * 0.02)
     # A broadcast layer stack, ragged final chunk and different positions per batch.
     stacked = torch.randn(2, 1031, 1, 32, dtype=torch.float64).expand(-1, -1, 4, -1)
     dummy = torch.randn(32, dtype=torch.float64) if with_dummy else None
@@ -211,7 +211,8 @@ def test_inference_pool_bounds_projection_memory_and_preserves_positions(monkeyp
     monkeypatch.setattr(torch, "cat", no_full_kv_concat)
     monkeypatch.setattr(pool, "_project", record)
     actual = pool.eval().project_sequence(stacked, rope, dummy_token=dummy)
-    assert len(sizes) == 3 and max(sizes) <= 1024 + stacked.shape[0]
+    assert len(sizes) == 3
+    assert max(sizes) <= 1024 + stacked.shape[0]
     torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
 
 

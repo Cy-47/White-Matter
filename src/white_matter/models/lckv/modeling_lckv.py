@@ -17,10 +17,10 @@ from white_matter.modules import KVPool, RotaryEmbedding
 from white_matter.modules.precision import cast_residual
 from white_matter.modules.routing import FixedSourceMixer
 
-from ..modeling_base import DecoderForCausalLM, DecoderModel, DecoderPreTrainedModel
 from .._qwen3 import make_feedback_layers
-from ..decoder_utils import prepare_decoder_inputs, prepare_attention_inputs, run_feedforward_layers
 from ..cache import DecoderCache
+from ..decoder_utils import prepare_attention_inputs, prepare_decoder_inputs, run_feedforward_layers
+from ..modeling_base import DecoderForCausalLM, DecoderModel, DecoderPreTrainedModel
 from .configuration_lckv import LCKVConfig
 
 
@@ -65,9 +65,9 @@ class LCKVDecoder(DecoderPreTrainedModel):
         )
         self.block = LCKVBlock(layers, pool, RotaryEmbedding(config.head_dim, config.rope_theta), num_passes=num_passes)
         # Feedforward layers after the feedback region.
-        self.post_layers = nn.ModuleList([
-            qwen3.Qwen3DecoderLayer(config, num_pre_layers + 1 + i) for i in range(num_post_layers)
-        ])
+        self.post_layers = nn.ModuleList(
+            [qwen3.Qwen3DecoderLayer(config, num_pre_layers + 1 + i) for i in range(num_post_layers)]
+        )
         # Rotary table for feedforward decoder layers (unshifted positions [0..T-1]).
         self.rotary_emb = RotaryEmbedding(config.head_dim, config.rope_theta)
 
@@ -78,7 +78,11 @@ class LCKVDecoder(DecoderPreTrainedModel):
         if module is self.block.kv_pool:
             weight = module.k_proj_weight
             _reserve_router_draws(
-                module.num_layers, module.hidden_size, std=self.config.initializer_range, device=weight.device, dtype=weight.dtype
+                module.num_layers,
+                module.hidden_size,
+                std=self.config.initializer_range,
+                device=weight.device,
+                dtype=weight.dtype,
             )
 
     def forward(
@@ -107,17 +111,29 @@ class LCKVDecoder(DecoderPreTrainedModel):
             )
         else:
             inputs_embeds = cast_residual(inputs_embeds, residual_dtype=self.config.residual_dtype)
-        ordinary_args = prepare_attention_inputs(
-            inputs_embeds, document_ids, self.rotary_emb, self.config._attn_implementation, position_ids,
-            past_key_values=past_key_values, attention_mask=attention_mask,
-        ) if self.pre_layers or self.post_layers else {}
+        ordinary_args = (
+            prepare_attention_inputs(
+                inputs_embeds,
+                document_ids,
+                self.rotary_emb,
+                self.config._attn_implementation,
+                position_ids,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+            )
+            if self.pre_layers or self.post_layers
+            else {}
+        )
         x = run_feedforward_layers(self.pre_layers, inputs_embeds, **ordinary_args)
         if past_key_values is None:
             x = self.block(x, num_passes=num_passes, num_gradient_passes=num_gradient_passes, document_ids=document_ids)
         elif not past_key_values.get_seq_length() and self.config.prefill_mode == "jacobi":
             x, (keys, values) = self.block(
-                x, num_passes=num_passes, num_gradient_passes=0,
-                document_ids=document_ids, output_final_state=True,
+                x,
+                num_passes=num_passes,
+                num_gradient_passes=0,
+                document_ids=document_ids,
+                output_final_state=True,
             )
             past_key_values.update(keys[:, 0], values[:, 0], self.config.num_pre_layers)
         else:
@@ -130,8 +146,8 @@ class LCKVDecoder(DecoderPreTrainedModel):
         storage = cache.layers[owner]
         outputs = []
         for t in range(x.shape[1]):
-            token = x[:, t:t + 1]
-            position = self.block.rotary_emb(token, position_ids[:, t:t + 1])
+            token = x[:, t : t + 1]
+            position = self.block.rotary_emb(token, position_ids[:, t : t + 1])
             hidden, states = token, []
             for layer in self.block.layers:
                 states.append(hidden)
@@ -139,8 +155,8 @@ class LCKVDecoder(DecoderPreTrainedModel):
                     lengths = cache.lengths(owner, x.shape[0])
                     mask = None
                     if document_ids is not None:
-                        previous = cache.document_ids[:, :cache.get_seq_length() + t]
-                        keep = previous == document_ids[:, t:t + 1]
+                        previous = cache.document_ids[:, : cache.get_seq_length() + t]
+                        keep = previous == document_ids[:, t : t + 1]
                         slots = torch.arange(storage.keys.shape[-2], device=x.device)
                         keep = torch.nn.functional.pad(keep, (0, storage.keys.shape[-2] - keep.shape[-1]))
                         keep = keep & (slots[None] < lengths[:, None])
@@ -148,8 +164,12 @@ class LCKVDecoder(DecoderPreTrainedModel):
                             ~keep[:, None, None], float("-inf")
                         )
                     hidden = layer(
-                        hidden, storage.keys, storage.values, position,
-                        decode_key_mask=mask, cache_seqlens=lengths,
+                        hidden,
+                        storage.keys,
+                        storage.values,
+                        position,
+                        decode_key_mask=mask,
+                        cache_seqlens=lengths,
                     )
                 else:
                     # The first token has no earlier KV to read.

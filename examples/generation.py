@@ -26,9 +26,15 @@ def main():
         parser.error("--tokens must be positive")
     register_models()
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer or args.checkpoint)
-    model = AutoModelForCausalLM.from_pretrained(
-        args.checkpoint, dtype=torch.bfloat16, attn_implementation="flash_attention_2",
-    ).cuda().eval()
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            args.checkpoint,
+            dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2",
+        )
+        .cuda()
+        .eval()
+    )
     model.config.document_separator_token_id = None
     if hasattr(model.config, "prefill_mode"):
         model.config.prefill_mode = "cyclic"

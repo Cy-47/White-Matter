@@ -29,7 +29,8 @@ def capture_autoregressive_graph(decoder, sample_hidden: torch.Tensor) -> torch.
     # Replay must execute fresh casts after each optimizer update.
     with torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
         graph = torch.cuda.make_graphed_callables(
-            _AutoregressiveDecoder(decoder).train(), (sample_hidden, documents),
+            _AutoregressiveDecoder(decoder).train(),
+            (sample_hidden, documents),
         )
     return graph
 

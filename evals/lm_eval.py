@@ -15,15 +15,14 @@ from lm_eval.api.model import TemplateLM
 from lm_eval.models.utils import Collator, normalize_gen_kwargs
 from transformers import AutoTokenizer, PreTrainedModel, StopStringCriteria
 
+from benchmarks._measurement import checkpoint_files
 from evals.loading import load_complete_model
+from evals.paper import PAPER_TASKS
 from evals.scoring import score_tokens
 from training.compile import compile_feedback
 from training.precision import attention_kernel_context
 from white_matter.models import register_models
 from white_matter.modules.precision import model_autocast_context
-
-from evals.paper import PAPER_TASKS
-from benchmarks._measurement import checkpoint_files
 
 register_models()
 
@@ -39,7 +38,8 @@ def harness_provenance() -> dict[str, str | None]:
     revision = None
     if (root / ".git").exists():
         revision = subprocess.check_output(
-            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True,
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            text=True,
         ).strip()
     else:
         direct_url = json.loads(distribution.read_text("direct_url.json") or "{}")
@@ -61,7 +61,7 @@ class _ContinuationStopStrings(StopStringCriteria):
         self.prompt_length = prompt_length
 
     def __call__(self, input_ids, scores, **kwargs):
-        return super().__call__(input_ids[:, self.prompt_length:], scores, **kwargs)
+        return super().__call__(input_ids[:, self.prompt_length :], scores, **kwargs)
 
 
 class WhiteMatterHarnessLM(TemplateLM):
@@ -88,7 +88,8 @@ class WhiteMatterHarnessLM(TemplateLM):
             raise ValueError("batch_size and logits_chunk must be positive; max_length must be at least 2")
         self.max_length_val = min(
             int(model.config.max_position_embeddings),
-            MAX_EVAL_CONTEXT_TOKENS, max_length,
+            MAX_EVAL_CONTEXT_TOKENS,
+            max_length,
         )
         self.num_passes = int(getattr(model.config, "num_passes", 1))
         self.cyclic_groups = int(getattr(model.config, "cyclic_groups", 8))
@@ -133,14 +134,13 @@ class WhiteMatterHarnessLM(TemplateLM):
                 input_ids = F.pad(input_ids, (0, pad_width), value=pad_id)
                 if attention_mask is not None:
                     attention_mask = F.pad(attention_mask, (0, pad_width))
-        with attention_kernel_context(str(self._device)):
-            with model_autocast_context(str(self._device)):
-                return self.model.model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    num_passes=self.num_passes,
-                    return_dict=True,
-                ).last_hidden_state
+        with attention_kernel_context(str(self._device)), model_autocast_context(str(self._device)):
+            return self.model.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                num_passes=self.num_passes,
+                return_dict=True,
+            ).last_hidden_state
 
     def _prepare_full_ids(self, context: list[int], continuation: list[int]) -> tuple[list[int], int]:
         if len(continuation) >= self.max_length_val:
@@ -174,16 +174,20 @@ class WhiteMatterHarnessLM(TemplateLM):
             attention_mask = torch.tensor(masks, dtype=torch.long, device=self._device)
 
             hidden = self._hidden_pre_lm_head(input_ids, attention_mask)
-            selected = torch.cat([hidden[row, start - 1 : len(full) - 1]
-                                  for row, (_, full, start) in enumerate(batch)])
+            selected = torch.cat([hidden[row, start - 1 : len(full) - 1] for row, (_, full, start) in enumerate(batch)])
             targets = [token for _, full, start in batch for token in full[start:]]
             token_log_probs, greedy = score_tokens(
-                selected, self.model.lm_head.weight, torch.tensor(targets, device=self._device),
+                selected,
+                self.model.lm_head.weight,
+                torch.tensor(targets, device=self._device),
                 chunk_size=self.logits_chunk,
             )
             lengths = [len(full) - start for _, full, start in batch]
             for (request_index, _, _), scores, matches in zip(
-                batch, token_log_probs.split(lengths), greedy.split(lengths), strict=True,
+                batch,
+                token_log_probs.split(lengths),
+                greedy.split(lengths),
+                strict=True,
             ):
                 results[request_index] = (float(scores.sum()), bool(matches.all()))
         return results
@@ -201,7 +205,10 @@ class WhiteMatterHarnessLM(TemplateLM):
                 input_ids = torch.tensor([chunk], dtype=torch.long, device=self._device)
                 hidden = self._hidden_pre_lm_head(input_ids)[:, : len(chunk)]
                 scores, _ = score_tokens(
-                    hidden[0, :-1], self.model.lm_head.weight, input_ids[0, 1:], chunk_size=self.logits_chunk,
+                    hidden[0, :-1],
+                    self.model.lm_head.weight,
+                    input_ids[0, 1:],
+                    chunk_size=self.logits_chunk,
                 )
                 total += float(scores.sum())
             results.append(total)
@@ -210,14 +217,16 @@ class WhiteMatterHarnessLM(TemplateLM):
     @torch.inference_mode()
     def generate_until(self, requests, disable_tqdm: bool = False) -> list[str]:
         del disable_tqdm
-        if self.model.config.execution_mode in {"cyclic", "jacobi"} and getattr(
-            self.model.config, "prefill_mode", None
-        ) is None:
+        if (
+            self.model.config.execution_mode in {"cyclic", "jacobi"}
+            and getattr(self.model.config, "prefill_mode", None) is None
+        ):
             raise ValueError("choose prefill_mode='cyclic', 'jacobi', or 'autoregressive' for generation")
         ordered = Collator(
             [request.args for request in requests],
             sort_fn=lambda item: -len(self.tok_encode(item[0])),
-            group_by="gen_kwargs", group_fn=lambda item: item[1],
+            group_by="gen_kwargs",
+            group_fn=lambda item: item[1],
         )
         results = []
         for batch in ordered.get_batched(n=self.batch_size):
@@ -232,8 +241,9 @@ class WhiteMatterHarnessLM(TemplateLM):
                 raise ValueError("evaluation supports one continuation per prompt without beam search")
             if not options["do_sample"]:
                 options.pop("temperature", None)
-            tokens = [(self.tok_encode(context) or [self.eot_token_id])[-(self.max_length - limit):]
-                      for context, _ in batch]
+            tokens = [
+                (self.tok_encode(context) or [self.eot_token_id])[-(self.max_length - limit) :] for context, _ in batch
+            ]
             width = max(map(len, tokens))
             pad = self.tokenizer.pad_token_id
             pad = self.eot_token_id if pad is None else pad
@@ -251,8 +261,10 @@ class WhiteMatterHarnessLM(TemplateLM):
                 return_dict_in_generate=False,
             )
             if stops:
-                options["stopping_criteria"] = [*options.get("stopping_criteria", []),
-                                                _ContinuationStopStrings(self.tokenizer, stops, width)]
+                options["stopping_criteria"] = [
+                    *options.get("stopping_criteria", []),
+                    _ContinuationStopStrings(self.tokenizer, stops, width),
+                ]
             with attention_kernel_context(str(self._device)), model_autocast_context(str(self._device)):
                 output = self.model.generate(ids, attention_mask=mask, num_passes=self.num_passes, **options)
             for row, (context, original_options) in zip(output[:, width:], batch, strict=True):
@@ -278,8 +290,13 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-fewshot", type=int, default=0)
     parser.add_argument("--log-samples", action="store_true", help="Save every prompt, generation, and score.")
-    parser.add_argument("--sample-range", type=int, nargs=2, metavar=("START", "STOP"),
-                        help="Evaluate a half-open document-index range for one task (for sharding).")
+    parser.add_argument(
+        "--sample-range",
+        type=int,
+        nargs=2,
+        metavar=("START", "STOP"),
+        help="Evaluate a half-open document-index range for one task (for sharding).",
+    )
     args = parser.parse_args()
     if args.sample_range is not None:
         start, stop = args.sample_range
@@ -304,11 +321,15 @@ def main() -> None:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     harness_model = WhiteMatterHarnessLM(
-        model=model, tokenizer=tokenizer, batch_size=args.batch_size, max_length=args.max_length,
+        model=model,
+        tokenizer=tokenizer,
+        batch_size=args.batch_size,
+        max_length=args.max_length,
     )
     task_manager = None
     if args.include_path is not None:
         from lm_eval.tasks import TaskManager
+
         task_manager = TaskManager(include_path=str(args.include_path))
     result = simple_evaluate(
         model=harness_model,
@@ -321,19 +342,28 @@ def main() -> None:
         samples={args.tasks[0]: list(range(*args.sample_range))} if args.sample_range is not None else None,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps({
-        "model": args.model, "tasks": args.tasks, "limit": args.limit,
-        "checkpoint": checkpoint_files(args.model) if Path(args.model).is_dir() else None,
-        "model_config": model.config.to_dict(),
-        "n_samples": result.get("n-samples", {}),
-        "num_fewshot": args.num_fewshot,
-        "max_length": harness_model.max_length, "results": result["results"],
-        "harness": harness_provenance(),
-        "task_versions": result.get("versions", {}),
-        "task_configs": result.get("configs", {}),
-        **({"sample_range": args.sample_range} if args.sample_range is not None else {}),
-        **({"samples": result["samples"]} if args.log_samples else {}),
-    }, indent=2, default=str))
+    args.output.write_text(
+        json.dumps(
+            {
+                "model": args.model,
+                "tasks": args.tasks,
+                "limit": args.limit,
+                "checkpoint": checkpoint_files(args.model) if Path(args.model).is_dir() else None,
+                "model_config": model.config.to_dict(),
+                "n_samples": result.get("n-samples", {}),
+                "num_fewshot": args.num_fewshot,
+                "max_length": harness_model.max_length,
+                "results": result["results"],
+                "harness": harness_provenance(),
+                "task_versions": result.get("versions", {}),
+                "task_configs": result.get("configs", {}),
+                **({"sample_range": args.sample_range} if args.sample_range is not None else {}),
+                **({"samples": result["samples"]} if args.log_samples else {}),
+            },
+            indent=2,
+            default=str,
+        )
+    )
 
 
 if __name__ == "__main__":

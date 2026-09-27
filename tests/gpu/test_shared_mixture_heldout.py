@@ -23,10 +23,19 @@ def test_compiled_packed_three_pass_score_matches_direct_cross_entropy():
     configure_precision("cuda")
     torch.manual_seed(825)
     cfg = SharedMixtureConfig(
-        vocab_size=257, hidden_size=192, intermediate_size=384,
-        num_hidden_layers=4, num_attention_heads=2, num_key_value_heads=1,
-        head_dim=96, eos_token_id=256, document_separator_token_id=256,
-        num_kv_channels=4, num_passes=3, cyclic_groups=8, router_layer_stride=2,
+        vocab_size=257,
+        hidden_size=192,
+        intermediate_size=384,
+        num_hidden_layers=4,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=96,
+        eos_token_id=256,
+        document_separator_token_id=256,
+        num_kv_channels=4,
+        num_passes=3,
+        cyclic_groups=8,
+        router_layer_stride=2,
     )
     cfg._attn_implementation = "flash_attention_2"
     optimized = AutoModelForCausalLM.from_config(cfg).cuda().eval()

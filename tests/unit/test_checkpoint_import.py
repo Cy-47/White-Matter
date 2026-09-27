@@ -9,8 +9,16 @@ from white_matter.models.vanilla import VanillaConfig
 
 
 def _source(tmp_path, monkeypatch):
-    dimensions = dict(vocab_size=31, hidden_size=16, intermediate_size=32, num_hidden_layers=2,
-                      num_attention_heads=2, num_key_value_heads=1, head_dim=8, eos_token_id=30)
+    dimensions = {
+        "vocab_size": 31,
+        "hidden_size": 16,
+        "intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "head_dim": 8,
+        "eos_token_id": 30,
+    }
     monkeypatch.setitem(importer.SPECS, "vanilla_24l", (VanillaConfig, dimensions, {}))
     model = AutoModelForCausalLM.from_config(VanillaConfig(**dimensions)).eval()
     source = tmp_path / "research.pt"

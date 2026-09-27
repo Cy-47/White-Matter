@@ -16,7 +16,12 @@ from white_matter.ops import CyclicAttentionMetadata
 
 class FeedbackDecoderLayer(nn.Module):
     def __init__(
-        self, hidden_size: int, attention: FeedbackAttention, mlp: FeedForward, *, rms_norm_eps: float = 1e-6,
+        self,
+        hidden_size: int,
+        attention: FeedbackAttention,
+        mlp: FeedForward,
+        *,
+        rms_norm_eps: float = 1e-6,
     ) -> None:
         super().__init__()
         self.self_attn = attention

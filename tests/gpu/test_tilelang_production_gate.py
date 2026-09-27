@@ -106,7 +106,8 @@ def _lckv_model(attention_implementation: str) -> WhiteMatterForCausalLM:
         num_passes=3,
         num_pre_layers=1,
         num_post_layers=1,
-        eos_token_id=256, document_separator_token_id=256,
+        eos_token_id=256,
+        document_separator_token_id=256,
     )
     config._attn_implementation = attention_implementation
     torch.manual_seed(21)
@@ -205,7 +206,8 @@ def _nccl_gradient_reduce_worker(rank: int, rendezvous: str) -> None:
             cyclic_groups=1,
             router_layer_stride=1,
             router_prior="shifted_identity:0.25",
-            eos_token_id=100, document_separator_token_id=100,
+            eos_token_id=100,
+            document_separator_token_id=100,
         )
         config._attn_implementation = "sdpa"
         model = AutoModelForCausalLM.from_config(config).cuda().train()

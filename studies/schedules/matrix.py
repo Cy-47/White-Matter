@@ -7,7 +7,6 @@ from pathlib import Path
 
 from studies.protocol import PAPER_SMALL_MODEL, validate_paper_training_recipe
 
-
 ROOT = Path(__file__).resolve().parent / "recipes"
 SEEDS = (1337, 1338)
 NO_GRAD = (1, 2, 4)
@@ -49,7 +48,12 @@ def validate_recipe(recipe, path: str | Path) -> tuple[int, str]:
         raise ValueError("invalid Figure 7a recipe path") from exc
     if path != recipe_path(seed, path.stem) or recipe.name != f"schedules_seed{seed}_{path.stem}":
         raise ValueError("Figure 7a recipe path and name disagree")
-    if (recipe.seed, recipe.steps, recipe.global_batch_size, recipe.gradient_accumulation_steps) != (seed, 20_000, 8, 1):
+    if (recipe.seed, recipe.steps, recipe.global_batch_size, recipe.gradient_accumulation_steps) != (
+        seed,
+        20_000,
+        8,
+        1,
+    ):
         raise ValueError("Figure 7a training budget differs from the paper")
     if (recipe.no_gradient_passes, recipe.gradient_passes, recipe.model.num_passes) != (no_grad, grad, no_grad + grad):
         raise ValueError("Figure 7a pass counts differ from the arm name")
@@ -59,16 +63,25 @@ def validate_recipe(recipe, path: str | Path) -> tuple[int, str]:
         raise ValueError("Figure 7a execution schedule differs from the arm name")
     if recipe.model.checkpoint_jacobi_passes != (mode == "tp"):
         raise ValueError("Figure 7a Jacobi checkpoint policy differs from the paper")
-    if (recipe.model.num_kv_channels, recipe.model.router_prior, recipe.model.router_layer_stride) != (8, "cyclic:0.25", 2):
+    if (recipe.model.num_kv_channels, recipe.model.router_prior, recipe.model.router_layer_stride) != (
+        8,
+        "cyclic:0.25",
+        2,
+    ):
         raise ValueError("Figure 7a architecture differs from the paper")
     if recipe.data.sequence_length != 2048:
         raise ValueError("Figure 7a requires 2048-token cache rows")
     from white_matter.models.white_matter import WhiteMatterConfig
 
     expected_model = WhiteMatterConfig(
-        **PAPER_SMALL_MODEL, num_kv_channels=8, num_passes=no_grad + grad,
-        prefill_mode="cyclic", cyclic_groups=expected_groups, router_layer_stride=2,
-        router_prior="cyclic:0.25", execution_mode=expected_mode,
+        **PAPER_SMALL_MODEL,
+        num_kv_channels=8,
+        num_passes=no_grad + grad,
+        prefill_mode="cyclic",
+        cyclic_groups=expected_groups,
+        router_layer_stride=2,
+        router_prior="cyclic:0.25",
+        execution_mode=expected_mode,
         checkpoint_jacobi_passes=mode == "tp",
     )
     validate_paper_training_recipe(recipe, expected_model)

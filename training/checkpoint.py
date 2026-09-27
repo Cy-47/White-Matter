@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import os
 import hashlib
-import json
 import importlib
-from pathlib import Path
+import json
+import os
 import random
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -17,6 +17,32 @@ import torch.distributed as dist
 
 HF_FULL_STATE_DICT_FORMAT = "hf_full_state_dict_v2"
 RANKED_RNG_STATE_FORMAT = "white_matter_ranked_rng_state_v1"
+
+
+def resolve_training_resume(output_dir: Path, resume_from: Path | None) -> Path:
+    """Reject existing run artifacts unless continuing that directory's checkpoint."""
+    output_dir = Path(output_dir).expanduser().resolve()
+    checkpoint = output_dir / "ckpt_full.pt"
+    resume = Path(resume_from).expanduser().resolve() if resume_from is not None else checkpoint
+    if resume_from is not None and not resume.is_file():
+        raise FileNotFoundError(f"resume checkpoint does not exist: {resume}")
+    if output_dir.exists() and not output_dir.is_dir():
+        raise ValueError(f"results path is not a directory: {output_dir}")
+    if checkpoint.exists():
+        if not checkpoint.is_file():
+            raise ValueError(f"resume checkpoint is not a file: {checkpoint}")
+        if resume.resolve() != checkpoint.resolve():
+            raise ValueError("output directory already has ckpt_full.pt; choose a new output directory")
+    else:
+        artifacts = [
+            name for name in ("metrics.jsonl", "latest", "final", "ckpt_full.pt.tmp") if (output_dir / name).exists()
+        ]
+        if artifacts:
+            raise FileExistsError(
+                f"output directory contains run artifacts without a resume checkpoint: {', '.join(artifacts)}; "
+                "choose a new output directory"
+            )
+    return resume
 
 
 def capture_local_rng_state(
@@ -32,7 +58,7 @@ def capture_local_rng_state(
         cuda_state = torch.cuda.get_rng_state(cuda_device)
     return {
         "np_rng": rng.bit_generator.state,
-        "np_global": np.random.get_state(),
+        "np_global": np.random.get_state(),  # noqa: NPY002 - preserve third-party global RNG state.
         "py_random": random.getstate(),
         "torch_cpu": torch.get_rng_state(),
         "torch_cuda": cuda_state,
@@ -158,7 +184,7 @@ def restore_rng_states(
         raise ValueError(f"invalid current RNG rank {rank} for world_size={world_size}")
     state = ranked[rank]
     rng.bit_generator.state = state["np_rng"]
-    np.random.set_state(state["np_global"])
+    np.random.set_state(state["np_global"])  # noqa: NPY002 - restore the checkpointed global RNG.
     random.setstate(state["py_random"])
     torch.set_rng_state(state["torch_cpu"])
     cuda_state = state["torch_cuda"]

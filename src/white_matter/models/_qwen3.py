@@ -20,11 +20,12 @@ Derived from Hugging Face Transformers; this local subset is maintained here.
 import torch
 from torch import nn
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-
 from transformers.models.qwen3.modeling_qwen3 import eager_attention_forward
-from white_matter.layers import WhiteMatterAttention
-from white_matter.layers.backends import attention_forward as run_attention, pack_kv_cache
+
 from white_matter.blocks.decoder_layer import FeedbackDecoderLayer
+from white_matter.layers import WhiteMatterAttention
+from white_matter.layers.backends import attention_forward as run_attention
+from white_matter.layers.backends import pack_kv_cache
 from white_matter.modules import GatedMLP
 from white_matter.modules.rotary import apply_rotary_pos_emb
 
@@ -43,8 +44,14 @@ def attention_forward(module, query, key, value, attention_mask, **kwargs):
         if attention_mask is not None:
             implementation, lengths = "sdpa", None
         return run_attention(
-            query, key, value, attention_mask=attention_mask, scaling=module.scaling,
-            implementation=implementation, cache_seqlens=lengths, num_splits=module.num_splits,
+            query,
+            key,
+            value,
+            attention_mask=attention_mask,
+            scaling=module.scaling,
+            implementation=implementation,
+            cache_seqlens=lengths,
+            num_splits=module.num_splits,
         ), None
     interface = ALL_ATTENTION_FUNCTIONS.get_interface(implementation, eager_attention_forward)
     return interface(
@@ -144,7 +151,7 @@ class Qwen3DecoderLayer(nn.Module):
 
 def make_feedback_layers(config, num_layers, *, strict_causal=False):
     layers = []
-    for i in range(num_layers):
+    for _ in range(num_layers):
         attention = WhiteMatterAttention(
             config.hidden_size,
             config.num_attention_heads,
