@@ -18,8 +18,9 @@ import pytest
 from scripts import prepare_fineweb_edu as builder
 
 
+@pytest.mark.parametrize("backend", ["hf", "gigatoken", "auto"])
 @pytest.mark.parametrize("workers", [1, 2, 3, 4, 8, 12])
-def test_paper_cache_contents_are_worker_invariant(tmp_path, monkeypatch, workers):
+def test_paper_cache_contents_are_worker_invariant(tmp_path, monkeypatch, workers, backend):
     monkeypatch.setattr(builder, "N_TRAIN", 27)
     monkeypatch.setattr(builder, "N_VAL", 3)
     monkeypatch.setattr(builder, "N_TEST", 5)
@@ -51,6 +52,10 @@ def test_paper_cache_contents_are_worker_invariant(tmp_path, monkeypatch, worker
         SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=lambda *a, **kw: Tokenizer())),
     )
 
+    monkeypatch.setitem(
+        sys.modules, "gigatoken", SimpleNamespace(Tokenizer=lambda hf: SimpleNamespace(as_hf=lambda: hf))
+    )
+
     def build(name):
         path = tmp_path / name
         arr = np.lib.format.open_memmap(path, mode="w+", dtype=np.int32, shape=(35, 4))
@@ -75,6 +80,8 @@ def test_paper_cache_contents_are_worker_invariant(tmp_path, monkeypatch, worker
         "--workers",
         str(workers),
         "--reproduce-paper-order",
+        "--tokenizer-backend",
+        backend,
     ]
     monkeypatch.setattr(
         sys,
@@ -83,6 +90,7 @@ def test_paper_cache_contents_are_worker_invariant(tmp_path, monkeypatch, worker
     )
     builder.main()
     metadata = json.loads((output / "cache_meta.json").read_text())
+    assert metadata["tokenizer"]["backend"] == ("gigatoken" if backend == "auto" else backend)
     assert metadata["build"]["num_workers"] == min(workers, 8)
     assert metadata["build"]["num_partitions"] == 8
     assert metadata["build"]["partition_protocol"] == "fixed-eight-v1"
@@ -132,12 +140,16 @@ def test_worker_failure_aborts_build(tmp_path, monkeypatch, worker, error, messa
     monkeypatch.setattr(builder, "N_TEST", 0)
     monkeypatch.setattr(builder, "SEQUENCE_LENGTH", 4)
     monkeypatch.setattr(
-        builder, "parse_args", lambda: SimpleNamespace(output=tmp_path, workers=2, reproduce_paper_order=True)
+        builder,
+        "parse_args",
+        lambda: SimpleNamespace(output=tmp_path, workers=2, reproduce_paper_order=True, tokenizer_backend="hf"),
     )
     monkeypatch.setitem(
         sys.modules,
         "transformers",
-        SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=lambda *a, **kw: SimpleNamespace(eos_token_id=99))),
+        SimpleNamespace(
+            AutoTokenizer=SimpleNamespace(from_pretrained=lambda *a, **kw: SimpleNamespace(eos_token_id=99))
+        ),
     )
 
     def run():
@@ -167,12 +179,14 @@ def test_worker_failure_aborts_build(tmp_path, monkeypatch, worker, error, messa
 def test_defaults():
     args = builder.parse_args([])
     assert args.output == builder.DEFAULT_OUTPUT
+    assert args.tokenizer_backend == "auto"
     assert args.workers == 8
     assert not args.reproduce_paper_order
 
 
 @pytest.mark.parametrize("workers", [1, 2, 4, 8])
 def test_default_preserves_continuous_source_order(tmp_path, monkeypatch, workers):
+    monkeypatch.setitem(sys.modules, "gigatoken", None)
     monkeypatch.setattr(builder, "N_TRAIN", 27)
     monkeypatch.setattr(builder, "N_VAL", 3)
     monkeypatch.setattr(builder, "N_TEST", 5)

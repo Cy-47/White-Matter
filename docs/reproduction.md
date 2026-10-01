@@ -42,6 +42,35 @@ Build the FineWeb-Edu cache used by the paper recipes:
 python scripts/prepare_fineweb_edu.py --reproduce-paper-order
 ```
 
+For optional Gigatoken acceleration, install the extra and select its Hugging
+Face compatibility backend explicitly:
+
+```bash
+pip install -e '.[training,data,gigatoken]'
+python scripts/prepare_fineweb_edu.py --reproduce-paper-order --tokenizer-backend gigatoken
+```
+
+The default (`--tokenizer-backend auto`) uses Gigatoken when installed and
+Hugging Face otherwise. Use `--tokenizer-backend hf` to force Hugging Face. Both backends use
+identical filtering, EOS packing, and partitioning; the selected backend and
+installed tokenizer package versions are recorded in `cache_meta.json`.
+An explicitly requested but unavailable Gigatoken backend raises an error.
+A broken installation or failing tokenizer also raises rather than silently
+switching tokenizers. Omit `--reproduce-paper-order` for continuous source-order
+packing; in paper mode the eight logical partitions are independent of `--workers`.
+
+Run the opt-in real-data parity test after installing the `dev` extra:
+
+```bash
+WM_TEST_TOKENIZER_PARITY=1 python -m pytest --noconftest -s tests/integration/test_qwen_cache_parity.py
+```
+
+This downloads the Qwen3 tokenizer and streams 512 qualifying FineWeb-Edu
+documents. It compares exact token IDs (plus Unicode, code, and special-token
+edge cases) and packed `.npy` bytes across backends and batch sizes. The output
+records resolved model/dataset revisions, package versions, and the cache hash.
+This sample check does not establish equality for the entire corpus.
+
 The cache is written to `data/cache_fineweb_edu_20b_len2048`.
 Study commands validate the data settings and array layout.
 

@@ -11,6 +11,7 @@ import json
 import os
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,44 @@ TEXT_BATCH_SIZE, MIN_TEXT_CHARS = 8_000, 100
 NUM_PARTITIONS = 8
 PARTITION_PROTOCOL = "fixed-eight-v1"
 SOURCE_PROTOCOL = "continuous-source-v1"
+
+
+def resolve_tokenizer_backend(backend: str) -> str:
+    if backend != "auto":
+        return backend
+    try:
+        import gigatoken  # noqa: F401
+    except ModuleNotFoundError as exc:
+        if exc.name != "gigatoken":
+            raise
+        return "hf"
+    return "gigatoken"
+
+
+def load_tokenizer(backend: str):
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(DEFAULT_MODEL)
+    if tokenizer.eos_token_id is None:
+        raise ValueError(f"tokenizer {DEFAULT_MODEL!r} has no eos_token_id; EOS packing requires one")
+    if backend == "gigatoken":
+        try:
+            import gigatoken
+        except ImportError as exc:
+            raise ImportError("Gigatoken backend requires: pip install -e '.[training,data,gigatoken]'") from exc
+        tokenizer = gigatoken.Tokenizer(tokenizer).as_hf()
+    return tokenizer
+
+
+def tokenizer_metadata(backend: str) -> dict:
+    packages = ["transformers", "tokenizers"] + (["gigatoken"] if backend == "gigatoken" else [])
+    versions = {}
+    for package in packages:
+        try:
+            versions[package] = version(package)
+        except PackageNotFoundError:
+            versions[package] = None
+    return {"backend": backend, "versions": versions}
 
 
 def write_rows(dataset, tokenizer, out, *, n_target: int, row_offset: int = 0) -> tuple[int, int]:
@@ -92,9 +131,8 @@ def write_partition(
     row_offset = task["row_offset"]
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
     from datasets import load_dataset
-    from transformers import AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(DEFAULT_MODEL)
+    tok = load_tokenizer(task.get("tokenizer_backend", "hf"))
     ds = load_dataset(DEFAULT_DATASET, split=DEFAULT_SPLIT, streaming=True)
     # Logical partitions are independent of process count. Each gets the same
     # source shards, packing state, row quota, and output offset on every build.
@@ -141,13 +179,17 @@ def partition_tasks(n_total: int, num_partitions: int = NUM_PARTITIONS) -> list[
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description="Build a 20B-token FineWeb-Edu cache.")
     ap.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    ap.add_argument(
-        "--workers", type=int, default=8, help="Processes for --reproduce-paper-order (maximum 8)."
-    )
+    ap.add_argument("--workers", type=int, default=8, help="Processes for --reproduce-paper-order (maximum 8).")
     ap.add_argument(
         "--reproduce-paper-order",
         action="store_true",
         help="Use the paper's eight-partition data order.",
+    )
+    ap.add_argument(
+        "--tokenizer-backend",
+        choices=("auto", "hf", "gigatoken"),
+        default="auto",
+        help="auto uses Gigatoken when installed, otherwise Hugging Face",
     )
     args = ap.parse_args(argv)
     if args.workers < 1:
@@ -157,16 +199,13 @@ def parse_args(argv=None):
 
 def main():
     args = parse_args()
+    args.tokenizer_backend = resolve_tokenizer_backend(args.tokenizer_backend)
 
     # Resolve the delimiter from the selected tokenizer rather than assuming
     # Qwen's EOS id. Workers load this same tokenizer and use its EOS token for
     # packing, so persisting the resolved value keeps downstream document masks
     # aligned.
-    from transformers import AutoTokenizer
-
-    metadata_tokenizer = AutoTokenizer.from_pretrained(DEFAULT_MODEL)
-    if metadata_tokenizer.eos_token_id is None:
-        raise ValueError(f"tokenizer {DEFAULT_MODEL!r} has no eos_token_id; EOS packing requires one")
+    metadata_tokenizer = load_tokenizer(args.tokenizer_backend)
     eos_id = int(metadata_tokenizer.eos_token_id)
 
     n_total = N_TRAIN + N_VAL + N_TEST
@@ -178,9 +217,11 @@ def main():
         raise FileExistsError(f"refusing to overwrite existing cache: {tok_path}")
 
     tasks = partition_tasks(n_total, num_partitions) if args.reproduce_paper_order else []
+    for task in tasks:
+        task["tokenizer_backend"] = args.tokenizer_backend
     targets = [task["n_target"] for task in tasks]
     mode = "paper-partitions" if args.reproduce_paper_order else "source-order"
-    print(f"mode={mode} n_total={n_total}", flush=True)
+    print(f"mode={mode} tokenizer={args.tokenizer_backend} n_total={n_total}", flush=True)
 
     # Pre-allocate the output so the build never accumulates the full cache in memory.
     est_gb = n_total * SEQUENCE_LENGTH * 4 / 1e9
@@ -214,6 +255,7 @@ def main():
         "n_total": int(n_total),
         "max_length": SEQUENCE_LENGTH,
         "model": DEFAULT_MODEL,
+        "tokenizer": tokenizer_metadata(args.tokenizer_backend),
         "dataset": DEFAULT_DATASET,
         "dataset_config": "",
         "dataset_split": DEFAULT_SPLIT,
