@@ -44,7 +44,7 @@ def test_cyclic_inference_matches_general_execution(monkeypatch, channels, passe
                 FeedbackDecoderLayer(width, WhiteMatterAttention(width, 2, dim), GatedMLP(width, 2 * width))
                 for _ in range(4)
             ],
-            KVPool(width, 1, dim, 4, channels),
+            KVPool(width, 1, dim, 5, channels),
             RotaryEmbedding(dim),
             num_passes=passes,
         )

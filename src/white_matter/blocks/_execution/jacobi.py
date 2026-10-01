@@ -71,7 +71,7 @@ def forward_jacobi(
         raise ValueError("pass observation is inference-only")
     detached_passes = n_iter - num_gradient_passes
     q_pos_emb, k_pos_emb = self._prepare_rope(x, document_ids)
-    states = x.unsqueeze(1).expand(-1, len(self.layers), -1, -1).contiguous()
+    states = x.unsqueeze(1).expand(-1, self.kv_pool.num_layers, -1, -1).contiguous()
     with torch.no_grad(), model_autocast_context(x.device):
         for index in range(detached_passes):
             states, hidden = self.jacobi_pass(x, states, q_pos_emb, k_pos_emb, document_ids)

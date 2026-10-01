@@ -113,6 +113,9 @@ class DepthCausalConfig(WhiteMatterConfig):
         mode = kwargs.pop("execution_mode", "depth_causal")
         if mode != "depth_causal":
             raise ValueError("depth-causal study requires depth_causal execution")
+        kwargs.setdefault("include_top_output", False)
+        if kwargs["include_top_output"]:
+            raise ValueError("depth-causal study requires include_top_output=False")
         kwargs.setdefault("num_passes", 1)
         kwargs.setdefault("router_prior", "identity:0.25")
         kwargs.setdefault("num_kv_channels", kwargs.get("num_hidden_layers", 16))

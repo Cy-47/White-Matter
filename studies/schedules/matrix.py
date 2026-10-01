@@ -76,6 +76,7 @@ def validate_recipe(recipe, path: str | Path) -> tuple[int, str]:
     expected_model = WhiteMatterConfig(
         **PAPER_SMALL_MODEL,
         num_kv_channels=8,
+        include_top_output=False,
         num_passes=no_grad + grad,
         prefill_mode="cyclic",
         cyclic_groups=expected_groups,

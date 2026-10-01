@@ -152,7 +152,7 @@ def test_cyclic_export_matches_full_layout_and_continuation(device, k):
         schedule = _prepare_cyclic_groups(block, x.shape[1], 4, q_rope, k_rope, x.device, cache_rope=False)
         metadata = prepare_feedback_metadata(docs, schedule[0], x.shape[1])
         K, V = block.kv_pool.project_sequence(
-            x.unsqueeze(2).expand(-1, -1, block.num_layers, -1), k_rope, dummy_token=block.dummy_token
+            x.unsqueeze(2).expand(-1, -1, block.kv_pool.num_layers, -1), k_rope, dummy_token=block.dummy_token
         )
         # Independent full-layout rollout retains the last token at every pass.
         for _ in range(3):

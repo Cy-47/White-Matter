@@ -49,7 +49,11 @@ SPECS = {
     "lckv_w7": (LCKVConfig, SMALL, {"num_passes": 9, "num_pre_layers": 3, "num_post_layers": 4}),
     "vanilla_24l": (VanillaConfig, {**SMALL, "num_hidden_layers": 24}, {}),
     "vanilla_28l": (VanillaConfig, LARGE, {}),
-    "white_matter_k14": (WhiteMatterConfig, LARGE, {"num_kv_channels": 14, "num_passes": 3, "prefill_mode": "cyclic"}),
+    "white_matter_k14": (
+        WhiteMatterConfig,
+        LARGE,
+        {"include_top_output": False, "num_kv_channels": 14, "num_passes": 3, "prefill_mode": "cyclic"},
+    ),
 }
 
 

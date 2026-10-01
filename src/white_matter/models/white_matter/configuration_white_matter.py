@@ -15,6 +15,7 @@ class WhiteMatterConfig(DecoderConfig):
         router_layer_stride=2,
         router_prior="cyclic:0.25",
         router_dynamic=True,
+        include_top_output=True,
         checkpoint_jacobi_passes=False,
         num_pre_layers=0,
         num_post_layers=0,
@@ -38,6 +39,8 @@ class WhiteMatterConfig(DecoderConfig):
             raise ValueError(f"unsupported router prior: {router_prior!r}")
         if type(router_dynamic) is not bool:
             raise ValueError("router_dynamic must be boolean")
+        if type(include_top_output) is not bool:
+            raise ValueError("include_top_output must be boolean")
         if type(checkpoint_jacobi_passes) is not bool:
             raise ValueError("checkpoint_jacobi_passes must be boolean")
         if checkpoint_jacobi_passes and execution_mode != "jacobi":
@@ -47,6 +50,7 @@ class WhiteMatterConfig(DecoderConfig):
         self.cyclic_groups = cyclic_groups
         self.router_layer_stride = router_layer_stride
         self.router_prior = router_prior
+        self.include_top_output = include_top_output
         self.router_dynamic = router_dynamic
         self.checkpoint_jacobi_passes = checkpoint_jacobi_passes
         self.execution_mode = execution_mode

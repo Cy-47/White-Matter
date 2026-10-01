@@ -218,3 +218,11 @@ python scripts/plot_experiments.py rank --input outputs/studies/rank/summary.csv
 See [controlled convergence](../studies/prefill_convergence/README.md) for its
 full data/training/measurement workflow and figure command. Each ablation's
 README documents its training and evaluation protocol.
+
+WhiteMatter defaults to `include_top_output=True`: the mixer reads the feedback
+block input and every feedback layer output (L+1 sources for L layers). Set
+`include_top_output=False` to reproduce the paper's L-source mixer, which omits
+the final feedback layer output. The paper recipes and checkpoint importer set
+this explicitly. When loading older checkpoints whose configuration lacks this
+field, pass `include_top_output=False` to `from_pretrained`; the new default
+changes the pool and router parameter shapes.

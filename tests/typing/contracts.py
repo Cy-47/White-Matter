@@ -36,7 +36,7 @@ def check_contracts(x: torch.Tensor, segments: torch.Tensor) -> None:
     layer = FeedbackDecoderLayer(32, attention_contract, custom_mlp_contract)
     FeedbackDecoderLayer(32, attention_contract, mlp_contract)
     pool = KVPool(32, 2, 8, 1, 1)
-    block = WhiteMatterBlock([layer], pool, rope_contract)
+    block = WhiteMatterBlock([layer], pool, rope_contract, include_top_output=False)
     KVPool(32, 2, 8, 2, 1, mixer=mixer_contract)
     hidden, state = block.forward(x, cyclic_groups=2)
     assert_type(hidden, torch.Tensor)

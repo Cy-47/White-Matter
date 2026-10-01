@@ -22,6 +22,8 @@ class WhiteMatterBlock(nn.Module):
 
     Supplied components own their initialization. Default PyTorch construction
     is valid without a Hugging Face post_init or any trainer setup.
+    By default the pool needs L+1 sources: the block input and all L outputs.
+    Set include_top_output=False with an L-source pool for paper reproduction.
     """
 
     def __init__(
@@ -32,10 +34,14 @@ class WhiteMatterBlock(nn.Module):
         *,
         num_passes: int = 3,
         checkpoint_jacobi_passes: bool = False,
+        include_top_output: bool = True,
     ) -> None:
         super().__init__()
-        if not layers or len(layers) != kv_pool.num_layers:
-            raise ValueError("feedback layers must match the pool source depth")
+        if type(include_top_output) is not bool:
+            raise ValueError("include_top_output must be boolean")
+        if not layers or len(layers) + int(include_top_output) != kv_pool.num_layers:
+            raise ValueError("pool source depth must equal feedback depth plus include_top_output")
+        self.include_top_output = include_top_output
         self.num_layers = len(layers)
         self.num_kv_channels = kv_pool.num_kv_channels
         self.num_passes = num_passes
@@ -77,7 +83,7 @@ class WhiteMatterBlock(nn.Module):
         k_pos_emb: tuple[torch.Tensor, torch.Tensor],
         document_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Project (B,L,T,D) layer inputs, then sweep with fixed K/V."""
+        """Project (B,S,T,D) mixer sources, then sweep with fixed K/V."""
         K, V = self.kv_pool.project_sequence(
             layer_hidden_states.transpose(1, 2).contiguous(), k_pos_emb, dummy_token=self.dummy_token
         )
@@ -97,6 +103,7 @@ class WhiteMatterBlock(nn.Module):
             document_ids=document_ids,
             metadata=metadata,
             jacobi=True,
+            include_top_output=self.include_top_output,
         )
         return torch.stack(states, dim=1), hidden
 
@@ -167,6 +174,7 @@ class WhiteMatterBlock(nn.Module):
             channels[0].unbind(1),
             channels[1].unbind(1),
             position_embeddings,
+            include_top_output=self.include_top_output,
             decode_key_mask=attention_mask,
             cache_seqlens=cache_seqlens,
         )
@@ -177,7 +185,7 @@ class WhiteMatterBlock(nn.Module):
         """Project the learned dummy token at position zero: (k,B,H,1,d)."""
         dummy = self.dummy_token.view(1, 1, -1).expand(batch_size, 1, -1)
         positions = torch.zeros(1, 1, device=dummy.device, dtype=torch.long)
-        return self.kv_pool.project_token([dummy] * self.num_layers, self.rotary_emb(dummy, positions))
+        return self.kv_pool.project_token([dummy] * self.kv_pool.num_layers, self.rotary_emb(dummy, positions))
 
     def forward_recurrent(
         self,

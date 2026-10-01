@@ -24,9 +24,11 @@ def config():
     )
 
 
+@pytest.mark.parametrize("include_top_output", [False, True])
 @pytest.mark.parametrize("execution_mode", ["cyclic", "autoregressive"])
-def test_causal_lm_round_trip_preserves_weights_and_execution(tmp_path, execution_mode):
+def test_causal_lm_round_trip_preserves_weights_and_execution(tmp_path, execution_mode, include_top_output):
     cfg = config()
+    cfg.include_top_output = include_top_output
     cfg.execution_mode = execution_mode
     cfg.prefill_mode = execution_mode
     original = WhiteMatterForCausalLM(cfg).eval()
@@ -34,6 +36,8 @@ def test_causal_lm_round_trip_preserves_weights_and_execution(tmp_path, executio
     loaded = AutoModelForCausalLM.from_pretrained(tmp_path).eval()
     for name, value in original.state_dict().items():
         torch.testing.assert_close(loaded.state_dict()[name], value, rtol=0, atol=0)
+    assert loaded.config.include_top_output is include_top_output
+    assert loaded.model.decoder.block.kv_pool.num_layers == cfg.num_hidden_layers + int(include_top_output)
     assert loaded.config.execution_mode == execution_mode
     assert loaded.config.prefill_mode == execution_mode
     assert loaded.lm_head.weight is loaded.get_input_embeddings().weight

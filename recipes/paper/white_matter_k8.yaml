@@ -15,6 +15,7 @@ model:
   num_passes: 3
   cyclic_groups: 8
   router_layer_stride: 2
+  include_top_output: false
   router_prior: cyclic:0.25
   eos_token_id: 151643
   document_separator_token_id: 151643

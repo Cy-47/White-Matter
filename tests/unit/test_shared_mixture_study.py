@@ -98,6 +98,7 @@ def test_study_recipe_is_trainable_and_matched_to_control():
     assert shared.global_batch_size == control.global_batch_size
     assert shared.seed == control.seed
     assert shared.optimizer == control.optimizer
+    assert shared.model.include_top_output is control.model.include_top_output is False
     assert shared.model.num_kv_channels == control.model.num_kv_channels == 16
     assert shared.model.router_prior == "cyclic:0.25"
     assert control.model.router_prior == "shifted_identity:0.25"

@@ -18,6 +18,7 @@ def _chunk(block, x, keys, values, query_rope, key_rope, mask, return_output):
         query_rope,
         decode_key_mask=mask,
         return_output=return_output,
+        include_top_output=block.include_top_output,
     )
     key, value = block.kv_pool.project_sequence(torch.stack(states, dim=2), key_rope)
     return hidden, key, value
@@ -54,7 +55,7 @@ def forward_contiguous(
     run_chunk = _compiled_chunk if compiled else _chunk
     with model_autocast_context(x.device):
         keys, values = block.kv_pool.project_sequence(
-            x.unsqueeze(2).expand(-1, -1, len(block.layers), -1),
+            x.unsqueeze(2).expand(-1, -1, block.kv_pool.num_layers, -1),
             key_rope,
             dummy_token=block.dummy_token,
         )

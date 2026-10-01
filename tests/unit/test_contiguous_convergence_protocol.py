@@ -13,7 +13,7 @@ def reference(block, x, passes, chunks):
     # Keep layer-input state, and rebuild the entire pool before every chunk.
     # This intentionally does not share the candidate's in-place KV publication.
     qrope, krope = block._prepare_rope(x)
-    states = x.unsqueeze(2).expand(-1, -1, len(block.layers), -1).clone()
+    states = x.unsqueeze(2).expand(-1, -1, block.kv_pool.num_layers, -1).clone()
     outputs = torch.empty_like(x)
     length = x.shape[1]
     for _ in range(passes):
@@ -33,6 +33,8 @@ def reference(block, x, passes, chunks):
                     tuple(t[:, start:end] for t in qrope),
                     decode_key_mask=mask[None, None],
                 )
+            if block.include_top_output:
+                fresh.append(hidden)
             states[:, start:end] = torch.stack(fresh, dim=2)
             outputs[:, start:end] = hidden
     return outputs, block.kv_pool.project_sequence(states, krope, dummy_token=block.dummy_token)

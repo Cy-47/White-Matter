@@ -59,6 +59,7 @@ def validate_recipe(recipe, path: str | Path) -> str:
         expected_model = WhiteMatterConfig(
             **PAPER_SMALL_MODEL,
             num_kv_channels=channels,
+            include_top_output=False,
             num_passes=3,
             prefill_mode="cyclic",
             router_prior=prior,

@@ -20,7 +20,7 @@ def test_eager_jacobi_matches_sdpa_and_cannot_read_future_tokens():
 
     torch.manual_seed(73)
     layers = [FeedbackDecoderLayer(32, WhiteMatterAttention(32, 4, 8), GatedMLP(32, 64)) for i in range(2)]
-    reference = WhiteMatterBlock(layers, KVPool(32, 2, 8, 2, 1), RotaryEmbedding(8)).double()
+    reference = WhiteMatterBlock(layers, KVPool(32, 2, 8, 3, 1), RotaryEmbedding(8)).double()
     eager = copy.deepcopy(reference)
     for layer in eager.layers:
         layer.self_attn.attention_implementation = "eager"
@@ -129,7 +129,7 @@ def test_block_rejects_invalid_iteration_counts(options):
     from white_matter.modules import GatedMLP, KVPool, RotaryEmbedding
 
     layers = [FeedbackDecoderLayer(32, WhiteMatterAttention(32, 4, 8), GatedMLP(32, 64))]
-    block = WhiteMatterBlock(layers, KVPool(32, 2, 8, 1, 1), RotaryEmbedding(8, 10_000.0), num_passes=3)
+    block = WhiteMatterBlock(layers, KVPool(32, 2, 8, 2, 1), RotaryEmbedding(8, 10_000.0), num_passes=3)
     with pytest.raises(ValueError, match=next(iter(options))):
         block(torch.randn(1, 16, 32), **options)
 

@@ -43,7 +43,7 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
             config.hidden_size,
             config.num_key_value_heads,
             config.head_dim,
-            depth,
+            depth + int(config.include_top_output),
             config.num_kv_channels,
             rms_norm_eps=config.rms_norm_eps,
             initializer_range=config.initializer_range,
@@ -57,6 +57,7 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
             RotaryEmbedding(config.head_dim, config.rope_theta),
             num_passes=config.num_passes,
             checkpoint_jacobi_passes=config.checkpoint_jacobi_passes,
+            include_top_output=config.include_top_output,
         )
         self.post_layers = nn.ModuleList(
             [qwen3.Qwen3DecoderLayer(config, config.num_pre_layers + 1 + i) for i in range(config.num_post_layers)]

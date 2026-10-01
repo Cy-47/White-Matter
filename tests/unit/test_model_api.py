@@ -73,13 +73,19 @@ def test_short_cyclic_prompt_matches_causally_padded_prompt():
     assert generated.shape == (1, 5)
 
 
-def test_exact_ar_training_recomputation_matches_uncheckpointed_reference():
+@pytest.mark.parametrize("include_top_output", [False, True])
+def test_exact_ar_training_recomputation_matches_uncheckpointed_reference(include_top_output):
     from training.forward import TrainingForward
     from training.losses import checkpointed_linear_cross_entropy, lm_cross_entropy_from_hidden
     from white_matter.modules.documents import document_ids_from_eos
 
     torch.manual_seed(93)
-    model = AutoModelForCausalLM.from_config(tiny_config("white_matter", execution_mode="autoregressive")).train()
+    model = AutoModelForCausalLM.from_config(
+        tiny_config("white_matter", execution_mode="autoregressive", include_top_output=include_top_output)
+    ).train()
+    # Exercise a learned boundary state away from RMSNorm's zero-input singular scale.
+    with torch.no_grad():
+        model.model.decoder.block.dummy_token.normal_(std=0.02)
     reference = copy.deepcopy(model)
     ids = torch.tensor([[1, 100, 2, 3, 4, 100, 5], [6, 7, 100, 8, 100, 9, 10]])
 

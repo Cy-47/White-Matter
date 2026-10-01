@@ -24,15 +24,15 @@ def _init_logits(rows: int, cols: int, mode: str) -> torch.Tensor:
         return logits
 
     if base == "shifted_identity":
-        if rows != cols:
-            raise ValueError(f"shifted_identity init requires square matrix, got ({rows}, {cols})")
+        if cols not in {rows, rows + 1}:
+            raise ValueError(f"shifted_identity init requires L or L+1 sources for L channels, got ({rows}, {cols})")
         for row in range(rows):
             logits[row, min(row + 1, cols - 1)] = peak
         return logits
 
     if base == "identity":
-        if rows != cols:
-            raise ValueError(f"identity init requires square matrix, got ({rows}, {cols})")
+        if cols not in {rows, rows + 1}:
+            raise ValueError(f"identity init requires L or L+1 sources for L channels, got ({rows}, {cols})")
         logits.diagonal().fill_(peak)
         return logits
 

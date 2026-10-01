@@ -26,7 +26,7 @@ def _block() -> WhiteMatterBlock:
 
     torch.manual_seed(11)
     layers = [FeedbackDecoderLayer(192, WhiteMatterAttention(192, 2, 96), GatedMLP(192, 384)) for i in range(4)]
-    pool = KVPool(192, 1, 96, 4, 2, router_prior="cyclic:0.25", router_layer_stride=2)
+    pool = KVPool(192, 1, 96, 5, 2, router_prior="cyclic:0.25", router_layer_stride=2)
     return WhiteMatterBlock(layers, pool, RotaryEmbedding(96, 10_000.0), num_passes=3).cuda().train()
 
 

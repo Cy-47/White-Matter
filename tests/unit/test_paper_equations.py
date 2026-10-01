@@ -48,7 +48,7 @@ def paper_cyclic(block, x, documents, *, passes, gradient_passes, groups):
     metadata, in-place KV publication, pass shortcuts, or checkpointing.
     """
     qrope, krope = block._prepare_rope(x, documents)
-    states = x[:, :, None].expand(-1, -1, block.num_layers, -1)
+    states = x[:, :, None].expand(-1, -1, block.kv_pool.num_layers, -1)
     output = torch.zeros_like(x)
     length = x.shape[1]
     keys = torch.arange(length + 1)
@@ -74,20 +74,24 @@ def paper_cyclic(block, x, documents, *, passes, gradient_passes, groups):
                         tuple(t[:, slots] for t in qrope),
                         decode_key_mask=keep.unsqueeze(-3),
                     )
+                if block.include_top_output:
+                    fresh.append(hidden)
                 states = states.index_copy(1, slots, torch.stack(fresh, 2))
                 output = output.index_copy(1, slots, hidden)
     return output
 
 
+@pytest.mark.parametrize("include_top_output", [False, True])
 @pytest.mark.parametrize("channels", [1, 2, 4])
 @pytest.mark.parametrize("packed", [False, True])
 @pytest.mark.parametrize("gradient_passes", [2, 3])
-def test_cyclic_matches_paper_equations_and_all_gradients(channels, packed, gradient_passes):
+def test_cyclic_matches_paper_equations_and_all_gradients(channels, packed, gradient_passes, include_top_output):
     torch.manual_seed(608)
     block = WhiteMatterBlock(
         [FeedbackDecoderLayer(16, WhiteMatterAttention(16, 2, 8), GatedMLP(16, 24)) for _ in range(4)],
-        KVPool(16, 1, 8, 4, channels, router_layer_stride=2),
+        KVPool(16, 1, 8, 4 + int(include_top_output), channels, router_layer_stride=2),
         RotaryEmbedding(8),
+        include_top_output=include_top_output,
     ).double()
     # Nonzero routing weights, normalization gains, and boundary states are
     # essential: step-zero priors alone cannot test content-dependent routing.

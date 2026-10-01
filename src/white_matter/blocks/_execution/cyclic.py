@@ -236,7 +236,7 @@ def forward_cyclic(
     q_pos_emb, k_pos_emb = self._prepare_rope(x, document_ids)
     # The explicit batched input preserves backward numerics across the compiled pass boundary.
     dummy_token = self.dummy_token.view(1, 1, -1).expand(x.shape[0], 1, -1)
-    L = len(self.layers)
+    L = self.kv_pool.num_layers
     pass_inputs = _prepare_cyclic_groups(
         self, T, cyclic_groups, q_pos_emb, k_pos_emb, x.device, cache_rope=(document_ids is None)
     )
@@ -517,11 +517,12 @@ def _group_layers(
         values,
         rope,
         return_output=return_output,
+        include_top_output=block.include_top_output,
         query_stride=groups,
         query_offset=offset,
         metadata=metadata,
     )
-    # The final layer has no pool output, so non-output passes stop at its input.
+    # Top-inclusive pools need the final layer even on non-output passes.
     return hidden if return_output else None, states
 
 

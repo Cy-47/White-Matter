@@ -28,6 +28,11 @@ def test_schedule_matrix_contains_exactly_48_valid_paper_recipes():
                     path = recipe_path(seed, arm)
                     assert path in paths
                     recipe = load_recipe(path)
+                    assert recipe.model.include_top_output is False
+                    with torch.device("meta"):
+                        model = AutoModelForCausalLM.from_config(recipe.model)
+                    assert model.model.decoder.block.kv_pool.num_layers == 16
+                    assert sum(p.numel() for p in model.parameters()) == 128_429_568
                     assert validate_recipe(recipe, path) == (seed, arm)
                     recipe.model.training_step = 20_000
                     recipe.model.training_sequence_length = 2048
@@ -35,11 +40,12 @@ def test_schedule_matrix_contains_exactly_48_valid_paper_recipes():
                     assert validate_checkpoint(recipe.model) == (seed, arm)
 
 
-def test_schedule_recipe_rejects_changed_model_size():
+@pytest.mark.parametrize(("option", "value"), [("hidden_size", 1792), ("include_top_output", True)])
+def test_schedule_recipe_rejects_changed_architecture(option, value):
     path = recipe_path(1337, "ng1_g1_tp")
     recipe = load_recipe(path)
-    recipe.model.hidden_size = 1792
-    with pytest.raises(ValueError, match="hidden_size"):
+    setattr(recipe.model, option, value)
+    with pytest.raises(ValueError, match=option):
         validate_recipe(recipe, path)
 
 

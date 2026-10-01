@@ -72,14 +72,17 @@ def run_feedback_layers(
     position_embeddings: tuple[torch.Tensor, torch.Tensor],
     *,
     return_output: bool = True,
+    include_top_output: bool = False,
     **attention_kwargs: Any,
 ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-    """Sweep fixed K/V channels, retaining each layer's input for the next pool."""
+    """Retain layer inputs and optionally the final output for the next pool."""
     states = []
     for index, layer in enumerate(layers):
         states.append(hidden)
-        if not return_output and index == len(layers) - 1:
+        if not return_output and not include_top_output and index == len(layers) - 1:
             break
         channel = index % len(keys)
         hidden = layer(hidden, keys[channel], values[channel], position_embeddings, **attention_kwargs)
+    if include_top_output:
+        states.append(hidden)
     return hidden, states

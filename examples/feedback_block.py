@@ -19,7 +19,7 @@ def make_block(hidden_size=32, num_layers=4, num_kv_channels=2):
         )
         for i in range(num_layers)
     ]
-    pool = KVPool(hidden_size, 2, 8, num_layers, num_kv_channels, router_prior="cyclic:0.25", router_layer_stride=2)
+    pool = KVPool(hidden_size, 2, 8, num_layers + 1, num_kv_channels, router_prior="cyclic:0.25", router_layer_stride=2)
     return WhiteMatterBlock(layers, pool, RotaryEmbedding(8, 10_000.0), num_passes=3)
 
 
