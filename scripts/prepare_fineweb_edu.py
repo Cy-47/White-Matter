@@ -1,8 +1,7 @@
-"""Build the paper's EOS-packed FineWeb-Edu cache.
+"""Build an EOS-packed FineWeb-Edu cache.
 
-Workers stream disjoint parquet shards into one shared tokenized.npy memmap.
-Rows follow worker order, then shard order. Train/val/test are contiguous slices
-of this pre-shuffled source. cache_meta.json records the source, packing, and splits.
+The default packs the source continuously in dataset order.
+``--reproduce-paper-order`` uses the paper's eight independent partitions.
 """
 
 from __future__ import annotations
@@ -11,102 +10,153 @@ import argparse
 import json
 import os
 import time
-from multiprocessing import Process, Queue
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from queue import Empty
 
 import numpy as np
-from _packing import Packer
+
+try:
+    from ._packing import Packer
+except ImportError:  # Direct script invocation.
+    from _packing import Packer
 
 DEFAULT_DATASET = "karpathy/fineweb-edu-100b-shuffle"
 DEFAULT_SPLIT = "train"
 DEFAULT_TEXT_FIELD = "text"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B-Base"
+DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "data" / "cache_fineweb_edu_20b_len2048"
 N_TRAIN, N_VAL, N_TEST = 9_765_625, 2_000, 5_000
 SEQUENCE_LENGTH = 2_048
 TEXT_BATCH_SIZE, MIN_TEXT_CHARS = 8_000, 100
+NUM_PARTITIONS = 8
+PARTITION_PROTOCOL = "fixed-eight-v1"
+SOURCE_PROTOCOL = "continuous-source-v1"
 
 
-def worker(
-    *,
-    worker_id: int,
-    num_workers: int,
-    n_target: int,
-    row_offset: int,
-    tok_path: str,
-    q: Queue,
-):
+def write_rows(dataset, tokenizer, out, *, n_target: int, row_offset: int = 0) -> tuple[int, int]:
+    packer = Packer(SEQUENCE_LENGTH, tokenizer.eos_token_id)
+    written = 0
+    docs_seen = 0
+    texts = []
+
+    def flush() -> None:
+        nonlocal written, docs_seen, texts
+        for token_ids in tokenizer(texts, add_special_tokens=False, return_attention_mask=False)["input_ids"]:
+            docs_seen += 1
+            packer.add_doc(token_ids)
+        rows = packer.take_rows()[: n_target - written]
+        out[row_offset + written : row_offset + written + len(rows)] = rows
+        written += len(rows)
+        texts = []
+
+    for sample in dataset:
+        text = sample.get(DEFAULT_TEXT_FIELD)
+        if not text:
+            continue
+        text = text.strip()
+        if len(text) < MIN_TEXT_CHARS:
+            continue
+        texts.append(text)
+        if len(texts) < TEXT_BATCH_SIZE:
+            continue
+        flush()
+        if written >= n_target:
+            break
+    if texts and written < n_target:
+        flush()
+    return written, docs_seen
+
+
+def write_source_order_cache(tok_path: Path, tokenizer, *, n_target: int) -> None:
+    from datasets import load_dataset
+
+    out = np.lib.format.open_memmap(tok_path, mode="r+")
+    written, _ = write_rows(
+        load_dataset(DEFAULT_DATASET, split=DEFAULT_SPLIT, streaming=True),
+        tokenizer,
+        out,
+        n_target=n_target,
+    )
+    out.flush()
+    if written < n_target:
+        raise RuntimeError(f"dataset exhausted before target (written={written}, target={n_target})")
+
+
+def write_partition(
+    job: tuple[dict, str],
+) -> tuple[int, int, float]:
+    task, tok_path = job
+    partition_id = task["partition_id"]
+    num_partitions = task["num_partitions"]
+    n_target = task["n_target"]
+    row_offset = task["row_offset"]
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
     from datasets import load_dataset
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(DEFAULT_MODEL)
-    packer = Packer(SEQUENCE_LENGTH, tok.eos_token_id)
-
     ds = load_dataset(DEFAULT_DATASET, split=DEFAULT_SPLIT, streaming=True)
-    # Shard by parquet file: worker i gets the i-th contiguous block of shards,
-    # so downloads run concurrently and rows stay disjoint across workers.
-    ds = ds.shard(num_shards=num_workers, index=worker_id, contiguous=True)
+    # Logical partitions are independent of process count. Each gets the same
+    # source shards, packing state, row quota, and output offset on every build.
+    ds = ds.shard(num_shards=num_partitions, index=partition_id, contiguous=True)
 
-    # Open the shared output memmap and write only this worker's disjoint slice
+    # Open the shared output memmap and write only this partition's disjoint slice
     # [row_offset, row_offset + n_target). r+ = existing file, no realloc.
     out = np.lib.format.open_memmap(tok_path, mode="r+")
     assert out.shape == (N_TRAIN + N_VAL + N_TEST, SEQUENCE_LENGTH)
 
-    written = 0  # rows written into the memmap slice
-    docs_seen = 0
-    buf: list[str] = []
     t0 = time.time()
-    last_log = t0
 
-    def tokenize_batch(texts: list[str]) -> bool:
-        # Returns True once the worker has produced enough rows.
-        nonlocal written, docs_seen, last_log
-        enc = tok(texts, add_special_tokens=False)["input_ids"]
-        for ids in enc:
-            docs_seen += 1
-            packer.add_doc(ids)
-        # Each tokenizer batch already yields a contiguous block of packed rows.
-        rows = packer.take_rows()[: n_target - written]
-        out[row_offset + written : row_offset + written + len(rows)] = rows
-        written += len(rows)
-        now = time.time()
-        if now - last_log >= 30.0:
-            q.put((worker_id, written, now - t0))
-            last_log = now
-        return written >= n_target
-
-    for sample in ds:
-        txt = sample.get(DEFAULT_TEXT_FIELD)
-        if not txt:
-            continue
-        txt = txt.strip()
-        if len(txt) < MIN_TEXT_CHARS:
-            continue
-        buf.append(txt)
-        if len(buf) >= TEXT_BATCH_SIZE:
-            done = tokenize_batch(buf)
-            buf = []
-            if done:
-                break
-    if buf and written < n_target:
-        tokenize_batch(buf)
+    written, docs_seen = write_rows(
+        ds,
+        tok,
+        out,
+        n_target=n_target,
+        row_offset=row_offset,
+    )
 
     out.flush()
 
     if written < n_target:
         raise RuntimeError(
-            f"worker {worker_id}: shard exhausted before target "
+            f"partition {partition_id}: shard exhausted before target "
             f"(written={written}, target={n_target}, docs_seen={docs_seen})"
         )
-    q.put((worker_id, written, time.time() - t0))
+    return partition_id, written, time.time() - t0
+
+
+def partition_tasks(n_total: int, num_partitions: int = NUM_PARTITIONS) -> list[dict]:
+    """Assign contiguous output slices and independent packing boundaries."""
+    tasks = []
+    offset = 0
+    for partition_id in range(num_partitions):
+        target = n_total // num_partitions + int(partition_id < n_total % num_partitions)
+        tasks.append(
+            {"partition_id": partition_id, "num_partitions": num_partitions, "n_target": target, "row_offset": offset}
+        )
+        offset += target
+    return tasks
+
+
+def parse_args(argv=None):
+    ap = argparse.ArgumentParser(description="Build a 20B-token FineWeb-Edu cache.")
+    ap.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    ap.add_argument(
+        "--workers", type=int, default=8, help="Processes for --reproduce-paper-order (maximum 8)."
+    )
+    ap.add_argument(
+        "--reproduce-paper-order",
+        action="store_true",
+        help="Use the paper's eight-partition data order.",
+    )
+    args = ap.parse_args(argv)
+    if args.workers < 1:
+        ap.error("--workers must be positive")
+    return args
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Build a 20B-token FineWeb-Edu cache with the paper packing protocol.")
-    ap.add_argument("--output", type=Path, required=True)
-    ap.add_argument("--workers", type=int, default=8)
-    args = ap.parse_args()
+    args = parse_args()
 
     # Resolve the delimiter from the selected tokenizer rather than assuming
     # Qwen's EOS id. Workers load this same tokenizer and use its EOS token for
@@ -120,92 +170,45 @@ def main():
     eos_id = int(metadata_tokenizer.eos_token_id)
 
     n_total = N_TRAIN + N_VAL + N_TEST
-    if args.workers < 1:
-        ap.error("--workers must be positive")
-    W = args.workers
+    num_partitions = NUM_PARTITIONS
+    worker_count = min(args.workers, num_partitions)
     args.output.mkdir(parents=True, exist_ok=True)
     tok_path = args.output / "tokenized.npy"
     if tok_path.exists():
         raise FileExistsError(f"refusing to overwrite existing cache: {tok_path}")
 
-    # Per-worker row targets sum exactly to n_total; offsets are the cumsum so
-    # each worker owns a disjoint contiguous slice of the output.
-    per_worker = [n_total // W] * W
-    for i in range(n_total - sum(per_worker)):
-        per_worker[i] += 1
-    offsets = [0]
-    for c in per_worker[:-1]:
-        offsets.append(offsets[-1] + c)
-    print(
-        f"workers={W} n_total={n_total} (~{N_TRAIN * SEQUENCE_LENGTH / 1e9:.2f}B train tok) "
-        f"per_worker={per_worker[:4]}{'...' if W > 4 else ''}",
-        flush=True,
-    )
+    tasks = partition_tasks(n_total, num_partitions) if args.reproduce_paper_order else []
+    targets = [task["n_target"] for task in tasks]
+    mode = "paper-partitions" if args.reproduce_paper_order else "source-order"
+    print(f"mode={mode} n_total={n_total}", flush=True)
 
-    # Pre-allocate the full output memmap ONCE; workers write disjoint slices.
+    # Pre-allocate the output so the build never accumulates the full cache in memory.
     est_gb = n_total * SEQUENCE_LENGTH * 4 / 1e9
     print(f"allocating {tok_path} shape=({n_total},{SEQUENCE_LENGTH}) int32 (~{est_gb:.1f} GB)...", flush=True)
     mm = np.lib.format.open_memmap(tok_path, mode="w+", dtype=np.int32, shape=(n_total, SEQUENCE_LENGTH))
     del mm  # workers reopen in r+ mode
 
-    q: Queue = Queue()
-    procs = []
     t0 = time.time()
-    for i in range(W):
-        p = Process(
-            target=worker,
-            kwargs={
-                "worker_id": i,
-                "num_workers": W,
-                "n_target": per_worker[i],
-                "row_offset": offsets[i],
-                "tok_path": str(tok_path),
-                "q": q,
-            },
-            daemon=False,
-        )
-        p.start()
-        procs.append(p)
-
-    progress = dict.fromkeys(range(W), 0)
-    while any(progress[i] < target for i, target in enumerate(per_worker)):
+    if args.reproduce_paper_order:
+        jobs = [(task, str(tok_path)) for task in tasks]
+        pool = ProcessPoolExecutor(max_workers=worker_count)
         try:
-            wid, n_done, elapsed = q.get(timeout=30)
-        except Empty:
-            failed = [p for p in procs if p.exitcode not in (None, 0)]
-            if failed:
-                for p in procs:
-                    if p.is_alive():
-                        p.terminate()
-                for p in procs:
-                    p.join()
-                details = ", ".join(f"pid={p.pid} exitcode={p.exitcode}" for p in failed)
-                raise RuntimeError(f"cache-build worker failed: {details}") from None
-            if all(p.exitcode is not None for p in procs):
-                raise RuntimeError(
-                    f"all cache-build workers exited before completion messages were received; progress={progress}"
-                ) from None
-            agg = sum(progress.values())
-            rate = agg / max(time.time() - t0, 1e-9)
-            eta = (n_total - agg) / max(rate, 1e-9)
-            print(
-                f"[heartbeat] {(time.time() - t0) / 60:.1f}m agg={agg}/{n_total} "
-                f"({rate:.0f} row/s, eta {eta / 60:.0f}m) per_worker={progress}",
-                flush=True,
-            )
-            continue
-        progress[wid] = n_done
-        agg = sum(progress.values())
-        rate = agg / max(time.time() - t0, 1e-9)
-        eta = (n_total - agg) / max(rate, 1e-9)
-        print(
-            f"[w{wid}] {n_done}/{per_worker[wid]}  agg={agg}/{n_total}  {rate:.0f} row/s  eta {eta / 60:.0f}m",
-            flush=True,
-        )
-    for p in procs:
-        p.join()
-        if p.exitcode != 0:
-            raise RuntimeError(f"worker pid={p.pid} exited with code {p.exitcode}")
+            futures = [pool.submit(write_partition, job) for job in jobs]
+            for future in as_completed(futures):
+                partition_id, written, elapsed = future.result()
+                print(f"partition {partition_id}: {written} rows in {elapsed / 60:.1f}m", flush=True)
+        except BaseException:
+            # Python 3.11–3.13 have no public executor API for stopping workers.
+            # Kill before shutdown so failed or interrupted builds cannot wait
+            # for other partitions to finish downloading or tokenizing.
+            for process in tuple((pool._processes or {}).values()):
+                if process.is_alive():
+                    process.kill()
+            raise
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+    else:
+        write_source_order_cache(tok_path, metadata_tokenizer, n_target=n_total)
 
     metadata = {
         "n_total": int(n_total),
@@ -221,8 +224,16 @@ def main():
         "splits": {"n_train": N_TRAIN, "n_val": N_VAL, "n_test": N_TEST},
         "build": {
             "tool": "prepare_fineweb_edu.py",
-            "num_workers": W,
-            "per_worker_target": per_worker,
+            **(
+                {
+                    "num_workers": worker_count,
+                    "partition_protocol": PARTITION_PROTOCOL,
+                    "num_partitions": num_partitions,
+                    "per_partition_target": targets,
+                }
+                if args.reproduce_paper_order
+                else {"ordering_protocol": SOURCE_PROTOCOL}
+            ),
             "elapsed_minutes": round((time.time() - t0) / 60.0, 2),
         },
     }

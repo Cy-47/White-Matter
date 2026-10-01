@@ -36,16 +36,14 @@ lm-eval tests additionally require the harness revision in the main guide.
 
 ## Data
 
-Build the public FineWeb-Edu cache with the documented eight-worker row order:
+Build the FineWeb-Edu cache used by the paper recipes:
 
 ```bash
-python scripts/prepare_fineweb_edu.py --output /path/to/fineweb_edu_cache --workers 8
+python scripts/prepare_fineweb_edu.py --reproduce-paper-order
 ```
 
-Study commands validate the source and packing configuration, split sizes,
-and array layout. They require eight workers because the worker count affects
-row order. Use the same cache for every arm in a comparison and retain its
-metadata with results; metadata validation does not verify token-array contents.
+The cache is written to `data/cache_fineweb_edu_20b_len2048`.
+Study commands validate the data settings and array layout.
 
 ## Legacy checkpoint conversion
 

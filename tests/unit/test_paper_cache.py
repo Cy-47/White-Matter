@@ -67,3 +67,38 @@ def test_archive_hash_check_remains_strict(tmp_path):
     (tmp_path / "cache_meta.json").write_text(json.dumps({"splits": {}}))
     with pytest.raises(ValueError, match="archived"):
         validate_paper_cache(tmp_path)
+
+
+@pytest.mark.parametrize("workers", [1, 3, 8])
+def test_fixed_partition_metadata_accepts_any_worker_count(tmp_path, monkeypatch, workers):
+    metadata = _metadata()
+    build = metadata["build"]
+    build["partition_protocol"] = "fixed-eight-v1"
+    build["num_partitions"] = 8
+    build["per_partition_target"] = build.pop("per_worker_target")
+    build["num_workers"] = workers
+    (tmp_path / "cache_meta.json").write_text(json.dumps(metadata))
+    monkeypatch.setattr(np, "load", lambda *a, **kw: SimpleNamespace(shape=(9_772_625, 2048), dtype=np.dtype("int32")))
+    assert validate_paper_cache(tmp_path) == metadata
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("partition_protocol", "unknown"),
+        ("num_partitions", 4),
+        ("per_partition_target", [1] * 8),
+    ],
+)
+def test_fixed_partition_metadata_rejects_changed_order(tmp_path, field, value):
+    metadata = _metadata()
+    build = metadata["build"]
+    build.update(
+        partition_protocol="fixed-eight-v1",
+        num_partitions=8,
+        per_partition_target=build.pop("per_worker_target"),
+    )
+    build[field] = value
+    (tmp_path / "cache_meta.json").write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="eight-partition"):
+        validate_paper_cache(tmp_path)

@@ -63,7 +63,7 @@ def validate_paper_training_recipe(recipe, expected_model) -> None:
 
 
 def validate_paper_cache(cache_dir: str | Path) -> dict:
-    """Accept archived data or the public eight-worker rebuild protocol.
+    """Accept archived data or the public fixed-partition rebuild protocol.
 
     Metadata and array layout are checked; neither route hashes the token array.
     A rebuild is not a claim of byte-for-byte equality with archived tokens.
@@ -88,7 +88,15 @@ def validate_paper_cache(cache_dir: str | Path) -> dict:
             if meta.get(key) != value:
                 raise ValueError(f"rebuilt paper cache {key} must equal {value!r}")
         targets = [total // 8 + int(worker < total % 8) for worker in range(8)]
-        if meta["build"].get("num_workers") != 8 or meta["build"].get("per_worker_target") != targets:
+        build = meta["build"]
+        if "partition_protocol" in build:
+            if (
+                build["partition_protocol"] != "fixed-eight-v1"
+                or build.get("num_partitions") != 8
+                or build.get("per_partition_target") != targets
+            ):
+                raise ValueError("rebuilt paper cache requires the fixed eight-partition row order")
+        elif build.get("num_workers") != 8 or build.get("per_worker_target") != targets:
             raise ValueError("rebuilt paper cache requires the eight-worker row order")
     else:
         for name, expected_hash in _PAPER_METADATA_SHA256.items():

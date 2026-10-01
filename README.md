@@ -44,10 +44,11 @@ Q/K/V have shape `(batch, heads, sequence, head_dim)`. The portable PyTorch back
 Prepare the FineWeb-Edu token cache, then train from a paper configuration:
 
 ```bash
-python scripts/prepare_fineweb_edu.py --output /path/to/data --workers 8
+python scripts/prepare_fineweb_edu.py --reproduce-paper-order
 torchrun --standalone --nproc-per-node=8 -m training.train \
   --recipe recipes/paper/white_matter_k8.yaml \
-  --data-dir /path/to/data --output-dir outputs/white_matter_k8
+  --data-dir data/cache_fineweb_edu_20b_len2048 \
+  --output-dir outputs/white_matter_k8
 ```
 
 The configurations in [recipes/paper](recipes/paper) cover the reported WhiteMatter models and comparison models. [The convergence study](studies/prefill_convergence/README.md) contains the exact autoregressive control and its quality/timing workflow. Training writes a resume checkpoint and a Hugging Face export for evaluation. The [Slurm examples](slurm/README.md) show cluster launches.
