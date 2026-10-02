@@ -11,6 +11,7 @@ class WhiteMatterConfig(DecoderConfig):
         *,
         num_kv_channels=8,
         num_passes=3,
+        use_dummy_token=False,
         cyclic_groups=8,
         router_layer_stride=2,
         router_prior="cyclic:0.25",
@@ -46,6 +47,9 @@ class WhiteMatterConfig(DecoderConfig):
         if checkpoint_jacobi_passes and execution_mode != "jacobi":
             raise ValueError("checkpoint_jacobi_passes requires jacobi execution")
         self.num_kv_channels = num_kv_channels
+        if type(use_dummy_token) is not bool:
+            raise ValueError("use_dummy_token must be boolean")
+        self.use_dummy_token = use_dummy_token
         self.num_passes = num_passes
         self.cyclic_groups = cyclic_groups
         self.router_layer_stride = router_layer_stride

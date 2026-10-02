@@ -29,6 +29,19 @@ outputs = model(**inputs)
 
 The model families are `white_matter`, `vanilla`, `lckv`, `fusedkv`, and `feedback_transformer`. WhiteMatter supports cyclic, Jacobi, or exact autoregressive execution. For generation with a WhiteMatter checkpoint, choose `prefill_mode="cyclic"` or `"jacobi"` for finite-pass prefill, or `"autoregressive"` for exact sequential prefill. See [inference](docs/inference.md) and the [generation example](examples/generation.py) for cache use and supported modes.
 
+WhiteMatter defaults to `use_dummy_token=False`: real tokens attend only to
+strictly earlier tokens, and the first token of each document receives zero
+attention output. Set `use_dummy_token=True` to retain the learned dummy slot.
+Older dummy-trained checkpoints without this configuration field must be loaded
+with `use_dummy_token=True`; paper recipes and the checkpoint importer specify it.
+
+The shared `white_matter.ops.strict_causal_attention` operator supports Jacobi,
+prefill with a cached prefix, and decode. It accepts already-projected Q/K/V in
+`(B,H,T,D)` layout and returns `(B,T,H,D)`. `query_start` and `kv_lengths` count
+real tokens, excluding the optional leading dummy slot. Cache writes remain the
+caller's responsibility. For packed documents, prepare and reuse
+`prepare_strict_causal_metadata(...)` outside the layer/iteration loop.
+
 The cyclic attention operator also works independently of the model classes:
 
 ```python

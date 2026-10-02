@@ -118,9 +118,12 @@ def test_static_model_bias_is_optimizer_owned_and_dynamic_weight_is_absent():
     assert all(parameter is not router.linear.weight for parameter in (*decay, *no_decay, *muon))
 
 
-def test_jacobi_model_trains_on_packed_documents_and_prefill_keeps_dummy_slot():
+@pytest.mark.parametrize("dummy", [False, True])
+def test_jacobi_model_trains_on_packed_documents_and_prefill_layout(dummy):
     register_models()
-    model = AutoModelForCausalLM.from_config(_small_config(execution_mode="jacobi", prefill_mode="jacobi"))
+    model = AutoModelForCausalLM.from_config(
+        _small_config(execution_mode="jacobi", prefill_mode="jacobi", use_dummy_token=dummy)
+    )
     ids = torch.tensor([[1, 2, 100, 3, 4]])
     loss = model(ids, labels=ids).loss
     loss.backward()
@@ -131,7 +134,7 @@ def test_jacobi_model_trains_on_packed_documents_and_prefill_keeps_dummy_slot():
     with torch.inference_mode():
         prefix = model(ids[:, :3], use_cache=True)
         assert prefix.past_key_values.get_seq_length() == 3
-        assert prefix.past_key_values.layers[0].keys.shape[-2] == 4
+        assert prefix.past_key_values.layers[0].keys.shape[-2] == 3 + int(dummy)
         continuation = model(ids[:, 3:], past_key_values=prefix.past_key_values)
         assert continuation.logits.shape == (1, 2, 101)
 

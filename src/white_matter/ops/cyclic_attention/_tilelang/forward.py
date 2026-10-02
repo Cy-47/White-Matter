@@ -100,9 +100,9 @@ def build_program(
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                 for i in T.Parallel(block_M):
                     # An unchanged maximum must rescale by exactly one.
-                    scores_scale[i] = T.exp2((scores_max_prev[i] - scores_max[i]) * scale)
+                    scores_scale[i] = T.exp2((scores_max_prev[i] - T.max(scores_max[i], -1e30)) * scale)
                 for i, j in T.Parallel(block_M, block_N):
-                    acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+                    acc_s[i, j] = T.exp2(acc_s[i, j] * scale - T.max(scores_max[i], -1e30) * scale)
                 T.reduce_sum(acc_s, scores_sum, dim=1)
                 for i in T.Parallel(block_M):
                     logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
@@ -115,7 +115,7 @@ def build_program(
                 T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
             for i, j in T.Parallel(block_M, D):
-                acc_o[i, j] /= logsum[i]
+                acc_o[i, j] /= T.max(logsum[i], 1.0)
             T.copy(acc_o, O_shared)
             for i, d in T.Parallel(block_M, D):
                 if (bx * block_M + i) // groups < Q_LEN:
@@ -126,8 +126,8 @@ def build_program(
             # Natural-log LSE for backward probability reconstruction.
             for i in T.Parallel(block_M):
                 if (bx * block_M + i) // groups < Q_LEN:
-                    Lse[bz, by * groups + (bx * block_M + i) % groups, (bx * block_M + i) // groups] = scores_max[
-                        i
-                    ] * inv_sqrt_d + T.log(logsum[i])
+                    Lse[bz, by * groups + (bx * block_M + i) % groups, (bx * block_M + i) // groups] = T.if_then_else(
+                        logsum[i] > 0, scores_max[i] * inv_sqrt_d + T.log(logsum[i]), T.infinity(_LSE_DTYPE)
+                    )
 
     return main

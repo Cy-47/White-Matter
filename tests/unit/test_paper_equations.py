@@ -92,6 +92,7 @@ def test_cyclic_matches_paper_equations_and_all_gradients(channels, packed, grad
         KVPool(16, 1, 8, 4 + int(include_top_output), channels, router_layer_stride=2),
         RotaryEmbedding(8),
         include_top_output=include_top_output,
+        use_dummy_token=True,
     ).double()
     # Nonzero routing weights, normalization gains, and boundary states are
     # essential: step-zero priors alone cannot test content-dependent routing.

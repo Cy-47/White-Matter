@@ -11,7 +11,7 @@ import torch.nn as nn
 from white_matter.layers import FeedbackAttention
 from white_matter.modules.checkpointing import checkpoint_pointwise
 from white_matter.modules.mlp import FeedForward
-from white_matter.ops import CyclicAttentionMetadata
+from white_matter.ops import CyclicAttentionMetadata, StrictCausalMetadata
 
 
 class FeedbackDecoderLayer(nn.Module):
@@ -37,13 +37,14 @@ class FeedbackDecoderLayer(nn.Module):
         q_position_embeddings: tuple[torch.Tensor, torch.Tensor],
         decode_key_mask: torch.Tensor | None = None,
         document_ids: torch.Tensor | None = None,
-        metadata: CyclicAttentionMetadata | None = None,
+        metadata: CyclicAttentionMetadata | StrictCausalMetadata | None = None,
         *,
         query_stride: int | None = None,
         query_offset: int = 0,
         cache_seqlens: torch.Tensor | None = None,
         committed_prefix: bool = False,
         jacobi: bool = False,
+        prefix_length: int = 0,
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.self_attn(
             self.input_layernorm(hidden_states),
@@ -58,6 +59,7 @@ class FeedbackDecoderLayer(nn.Module):
             cache_seqlens=cache_seqlens,
             committed_prefix=committed_prefix,
             jacobi=jacobi,
+            prefix_length=prefix_length,
         )
         mlp_input = self.post_attention_layernorm(hidden_states)
         mlp_output = checkpoint_pointwise(self.mlp, mlp_input) if torch.is_grad_enabled() else self.mlp(mlp_input)

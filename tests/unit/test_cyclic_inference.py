@@ -59,7 +59,9 @@ def test_cyclic_inference_matches_general_execution(monkeypatch, channels, passe
     if device == "cpu":
         # Exercise identical scheduling/storage on CPU without compiling reference attention.
         for name in ("_write_pool", "_inference_layers"):
-            monkeypatch.setattr(cyclic, name, getattr(cyclic, name)._torchdynamo_orig_callable)
+            monkeypatch.setattr(
+                cyclic, name, getattr(getattr(cyclic, name), "_torchdynamo_orig_callable", getattr(cyclic, name))
+            )
     # Match canonical production KV, not the reference driver's exported strides.
     shape = (*expected_kv[0].shape[:-2], length + 8, dim)
     keys = torch.full(shape, float("nan"), device=device, dtype=torch.bfloat16 if device == "cuda" else x.dtype)
@@ -73,7 +75,7 @@ def test_cyclic_inference_matches_general_execution(monkeypatch, channels, passe
         cyclic_groups=groups,
         output_final_state=True,
     )
-    assert all(torch.isnan(t[..., length + 1 :, :]).all() for t in (keys, values))
+    assert all(torch.isnan(t[..., length + int(block.use_dummy_token) :, :]).all() for t in (keys, values))
     assert all(t.shape == expected_kv[0].shape for t in state)
     assert state[0].data_ptr() == keys.data_ptr()
     assert state[1].data_ptr() == values.data_ptr()

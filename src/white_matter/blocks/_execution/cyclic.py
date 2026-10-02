@@ -55,7 +55,8 @@ def _prepare_cyclic_groups(
         q_cos, q_sin = q_pos_emb
         k_cos, k_sin = k_pos_emb
         query_group_rope = [(q_cos[:, p], q_sin[:, p]) for p in query_groups]
-        key_slots = [torch.cat((p.new_zeros(1), p + 1)) for p in query_groups]
+        offset = int(self.use_dummy_token)
+        key_slots = [torch.cat((p.new_zeros(offset), p + offset)) for p in query_groups]
         key_group_rope = [(k_cos.index_select(1, p), k_sin.index_select(1, p)) for p in key_slots]
         cached_rope = (query_group_rope, key_group_rope)
         if cache_rope:
@@ -66,11 +67,12 @@ def _prepare_cyclic_groups(
 def _compact_channel_major(
     K: torch.Tensor,
     V: torch.Tensor,
+    use_dummy_token: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(B,k,H,T+1,d)`` -> contiguous consumed ``(k,B,H,T,d)``."""
+    """Return channel-major readers, dropping the unread final slot in dummy mode."""
     return (
-        K[..., :-1, :].permute(1, 0, 2, 3, 4).contiguous(),
-        V[..., :-1, :].permute(1, 0, 2, 3, 4).contiguous(),
+        (K[..., :-1, :] if use_dummy_token else K).permute(1, 0, 2, 3, 4).contiguous(),
+        (V[..., :-1, :] if use_dummy_token else V).permute(1, 0, 2, 3, 4).contiguous(),
     )
 
 
@@ -92,7 +94,7 @@ def _training_group(
     update_positions: tuple[torch.Tensor, ...],
     key_updates: tuple[torch.Tensor, ...],
     value_updates: tuple[torch.Tensor, ...],
-    dummy_token: torch.Tensor,
+    dummy_token: torch.Tensor | None,
     positions: torch.Tensor,
     query_rope: tuple[torch.Tensor, torch.Tensor],
     key_rope: tuple[torch.Tensor, torch.Tensor],
@@ -122,7 +124,8 @@ def _training_group(
         key_rope,
         dummy_token=dummy_token,
     )
-    keys, values = keys[..., 1:, :].transpose(0, 1), values[..., 1:, :].transpose(0, 1)
+    prefix = int(block.use_dummy_token)
+    keys, values = keys[..., prefix:, :].transpose(0, 1), values[..., prefix:, :].transpose(0, 1)
     if terminal:
         keys, values = keys[..., :-1, :], values[..., :-1, :]
     return hidden if hidden is not None else x.new_empty(0), keys, values
@@ -228,14 +231,15 @@ def forward_cyclic(
             document_ids = torch.gather(document_ids, 1, order)
 
     T = x.shape[1]
+    offset = int(self.use_dummy_token)
     if bounded and kv_cache is None:
-        shape = (x.shape[0], self.num_kv_channels, self.kv_pool.num_key_value_heads, T + 1, self.kv_pool.head_dim)
+        shape = (x.shape[0], self.num_kv_channels, self.kv_pool.num_key_value_heads, T + offset, self.kv_pool.head_dim)
         dtype = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else x.dtype
         keys = torch.empty(shape, device=x.device, dtype=dtype)
         kv_cache = keys, torch.empty_like(keys)
     q_pos_emb, k_pos_emb = self._prepare_rope(x, document_ids)
     # The explicit batched input preserves backward numerics across the compiled pass boundary.
-    dummy_token = self.dummy_token.view(1, 1, -1).expand(x.shape[0], 1, -1)
+    dummy_token = None if self.dummy_token is None else self.dummy_token.view(1, 1, -1).expand(x.shape[0], 1, -1)
     L = self.kv_pool.num_layers
     pass_inputs = _prepare_cyclic_groups(
         self, T, cyclic_groups, q_pos_emb, k_pos_emb, x.device, cache_rope=(document_ids is None)
@@ -244,7 +248,7 @@ def forward_cyclic(
     if document_ids is not None:
         from .metadata import prepare_feedback_metadata
 
-        metadata = prepare_feedback_metadata(document_ids, pass_inputs[0], T)
+        metadata = prepare_feedback_metadata(document_ids, pass_inputs[0], T, use_dummy_token=self.use_dummy_token)
 
     # Cached prefill compiles its bounded operations, not the whole training pass.
     execute_pass = run_pass.__get__(self) if kv_cache is not None else self.cyclic_pass
@@ -258,9 +262,9 @@ def forward_cyclic(
         ):
             if kv_cache is not None:
                 K, V = (tensor.detach() for tensor in kv_cache)
-                initial = torch.cat((dummy_token.to(x.dtype), x), dim=1)
-                for start in range(0, T + 1, 64):
-                    stop = min(start + 64, T + 1)
+                initial = x if dummy_token is None else torch.cat((dummy_token.to(x.dtype), x), dim=1)
+                for start in range(0, T + offset, 64):
+                    stop = min(start + 64, T + offset)
                     slots = torch.arange(start, stop, device=x.device)
                     rope = tuple(t[:, start:stop] for t in k_pos_emb)
                     _write_pool(self, [initial[:, start:stop]] * L, K, V, slots, (rope[0], rope[1]))
@@ -278,7 +282,7 @@ def forward_cyclic(
             if kv_cache is None:
                 K, V = self.kv_pool.project_sequence(source, k_pos_emb, dummy_token=dummy_token)
                 if 1 < self.num_kv_channels < self.num_layers:
-                    K, V = _compact_channel_major(K, V)
+                    K, V = _compact_channel_major(K, V, self.use_dummy_token)
                 del source
             for p in range(count):
                 last = p == count - 1
@@ -289,6 +293,7 @@ def forward_cyclic(
                     dummy_token,
                     *pass_inputs,
                     metadata=metadata,
+                    channel_major=kv_cache is None and 1 < self.num_kv_channels < self.num_layers,
                     return_hidden_states=detached and last and num_gradient_passes > 0,
                     consume_state=detached,
                     pool_chunk_size=64 if kv_cache is not None else 0,
@@ -308,11 +313,11 @@ def forward_cyclic(
         return h, None
     if restore_perm is not None:
         # State must follow the caller's token order, just like the hidden outputs.
-        indices = restore_perm[:, None, None, :, None].expand_as(K[..., 1:, :])
-        K = torch.cat((K[..., :1, :], K[..., 1:, :].gather(3, indices)), dim=3)
-        V = torch.cat((V[..., :1, :], V[..., 1:, :].gather(3, indices)), dim=3)
+        indices = restore_perm[:, None, None, :, None].expand_as(K[..., offset:, :])
+        K = torch.cat((K[..., :offset, :], K[..., offset:, :].gather(3, indices)), dim=3)
+        V = torch.cat((V[..., :offset, :], V[..., offset:, :].gather(3, indices)), dim=3)
     if length < T or kv_cache is not None:
-        K, V = K[..., : length + 1, :], V[..., : length + 1, :]
+        K, V = K[..., : length + offset, :], V[..., : length + offset, :]
     return h, (K, V)
 
 
@@ -321,7 +326,7 @@ def run_pass(
     x_in: torch.Tensor,
     K_initial: torch.Tensor,
     V_initial: torch.Tensor,
-    dummy_token: torch.Tensor,
+    dummy_token: torch.Tensor | None,
     query_groups: list[torch.Tensor],
     query_group_rope: list[tuple[torch.Tensor, torch.Tensor]],
     key_group_rope: list[tuple[torch.Tensor, torch.Tensor]],
@@ -332,19 +337,26 @@ def run_pass(
     output_final_state: bool = False,
     pool_chunk_size: int = 0,
     return_output: bool = True,
+    channel_major: bool = False,
 ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Shared group order with functional training or bounded cache publication.
 
-    Training keeps its whole-pass compilation and dummy-row projection shape.
+    Training keeps its whole-pass compilation and optional dummy-row projection.
     Cached inference compiles only layer sweeps and bounded pool writes;
     pool_chunk_size and return_output configure that bounded branch.
     """
     _, T, _ = x_in.shape
+    offset = int(self.use_dummy_token)
     if K_initial.ndim != 5 or K_initial.shape != V_initial.shape:
         raise ValueError("cyclic state requires matching five-dimensional K/V tensors")
     # Compact states are channel-major without the final unconsumed key;
     # direct callers may still supply the public T+1 layout.
-    compact_fixed = 1 < self.num_kv_channels < self.num_layers and K_initial.shape[-2] == T
+    compact_fixed = channel_major or (
+        self.use_dummy_token
+        and 1 < self.num_kv_channels < self.num_layers
+        and K_initial.shape[-2] == T
+        and not pool_chunk_size
+    )
     inplace = not torch.is_grad_enabled()
     K = K_initial.clone() if inplace and not consume_state else K_initial
     V = V_initial.clone() if inplace and not consume_state else V_initial
@@ -361,7 +373,7 @@ def run_pass(
         value_updates: list[torch.Tensor] = []
         terminal_group = (T - 1) % len(query_groups)
         for offset, positions in enumerate(query_groups):
-            terminal = offset == terminal_group
+            terminal = self.use_dummy_token and offset == terminal_group
             hidden, keys, values = _run_training_group(
                 self,
                 x_in,
@@ -382,7 +394,8 @@ def run_pass(
             )
             if return_output:
                 outputs.append(hidden)
-            update_positions.append((positions + 1)[:-1] if terminal else positions + 1)
+            slots = positions + int(self.use_dummy_token)
+            update_positions.append(slots[:-1] if terminal else slots)
             key_updates.append(keys)
             value_updates.append(values)
         K = _rebuild_state(K_initial, tuple(update_positions), tuple(key_updates))
@@ -400,8 +413,8 @@ def run_pass(
         elif pool_chunk_size:
             channel_keys, channel_values = K[..., :T, :].unbind(1), V[..., :T, :].unbind(1)
         else:
-            channel_keys = tuple(tensor[..., :-1, :].contiguous() for tensor in K.unbind(1))
-            channel_values = tuple(tensor[..., :-1, :].contiguous() for tensor in V.unbind(1))
+            channel_keys = tuple(tensor[..., :T, :].contiguous() for tensor in K.unbind(1))
+            channel_values = tuple(tensor[..., :T, :].contiguous() for tensor in V.unbind(1))
         h, chunk_layer_inputs = execute_layers(
             self,
             x_in,
@@ -423,13 +436,13 @@ def run_pass(
         if pool_chunk_size:
             for start in range(0, chunk_positions.numel(), pool_chunk_size):
                 stop = min(start + pool_chunk_size, chunk_positions.numel())
-                rope = tuple(t[:, start + 1 : stop + 1] for t in key_group_rope[c])
+                rope = tuple(t[:, start + offset : stop + offset] for t in key_group_rope[c])
                 _write_pool(
                     self,
                     [state[:, start:stop] for state in chunk_layer_inputs],
                     K,
                     V,
-                    chunk_positions[start:stop] + 1,
+                    chunk_positions[start:stop] + offset,
                     (rope[0], rope[1]),
                 )
             del chunk_layer_inputs
@@ -441,13 +454,13 @@ def run_pass(
         # Keep the dummy row during projection: changing GEMM shape changes BF16 gradients.
         K_src, V_src = self.kv_pool.project_sequence(chunk_layer_states, key_group_rope[c], dummy_token=dummy_token)
         del chunk_layer_states
-        K_src, V_src = K_src[..., 1:, :], V_src[..., 1:, :]
+        K_src, V_src = K_src[..., offset:, :], V_src[..., offset:, :]
         # Publish after the layer sweep: later groups read these refreshed K/V.
-        positions = chunk_positions + 1
+        positions = chunk_positions + offset
         if compact_fixed:
             K_src, V_src = K_src.transpose(0, 1), V_src.transpose(0, 1)
             # Compact storage omits the last unread token; decoding needs it.
-            if c == (T - 1) % len(query_groups):
+            if self.use_dummy_token and c == (T - 1) % len(query_groups):
                 if output_final_state:
                     final_kv = K_src[..., -1:, :], V_src[..., -1:, :]
                 positions = positions[:-1]
@@ -466,9 +479,10 @@ def run_pass(
     )
     if output_final_state and compact_fixed:
         # Export all tokens in batch-major order, including the unread final token.
-        assert final_kv is not None
-        K = torch.cat((K, final_kv[0]), dim=3).transpose(0, 1)
-        V = torch.cat((V, final_kv[1]), dim=3).transpose(0, 1)
+        if self.use_dummy_token:
+            assert final_kv is not None
+            K, V = torch.cat((K, final_kv[0]), dim=3), torch.cat((V, final_kv[1]), dim=3)
+        K, V = K.transpose(0, 1), V.transpose(0, 1)
     hs = None
     if return_hidden_states:
         # Restore (B,L,T,D) layer inputs for the gradient transition.

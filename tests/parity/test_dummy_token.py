@@ -41,6 +41,7 @@ def test_dummy_projection_preserves_training(channels, gradient_passes, device, 
     configure_precision(device)
     torch.manual_seed(97)
     config = WhiteMatterConfig(
+        use_dummy_token=True,
         vocab_size=101,
         eos_token_id=100,
         document_separator_token_id=100,

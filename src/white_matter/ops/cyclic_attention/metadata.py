@@ -15,12 +15,12 @@ class CyclicAttentionMetadata(NamedTuple):
 
 
 def prepare_cyclic_attention_metadata(
-    query_document_ids: torch.Tensor, key_document_ids: torch.Tensor
+    query_document_ids: torch.Tensor, key_document_ids: torch.Tensor, *, use_dummy_token: bool = True
 ) -> CyclicAttentionMetadata:
     """Prepare bounds outside compiled loops from sorted per-row segment IDs.
 
     Both inputs are integer matrices (batch, length). Keys must start with one
-    globally visible dummy slot, ID -1. Remaining IDs are nonnegative and
+    globally visible dummy slot, ID -1, when use_dummy_token=True. Real IDs are nonnegative and
     nondecreasing; queries are nonnegative and nondecreasing. IDs must fit int32
     even when input tensors use int64. Slot-to-token
     mapping and document numbering belong to the caller. Bounds must be rebuilt
@@ -42,13 +42,15 @@ def prepare_cyclic_attention_metadata(
             raise ValueError("segment IDs must fit int32 (maximum 2147483647)")
         if bool((ids[:, 1:] < ids[:, :-1]).any()):
             raise ValueError("segment IDs must be nondecreasing within each row")
-    if bool((query_document_ids < 0).any()) or bool((key_document_ids[:, 1:] < 0).any()):
+    offset = int(use_dummy_token)
+    if bool((query_document_ids < 0).any()) or bool((key_document_ids[:, offset:] < 0).any()):
         raise ValueError("only the leading key dummy may have a negative segment ID")
-    if not bool((key_document_ids[:, 0] == -1).all()):
+    if use_dummy_token and not bool((key_document_ids[:, 0] == -1).all()):
         raise ValueError("document attention requires a leading dummy key with segment ID -1")
     q = query_document_ids.to(torch.int32).contiguous()
     k = key_document_ids.to(torch.int32).contiguous()
     start = torch.searchsorted(k, q).to(torch.int32)
     end = torch.searchsorted(q, k, right=True).to(torch.int32)
-    end[:, 0] = q.shape[1]
+    if use_dummy_token:
+        end[:, 0] = q.shape[1]
     return CyclicAttentionMetadata(q, k, start, end)

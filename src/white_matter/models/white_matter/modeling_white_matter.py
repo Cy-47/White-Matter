@@ -34,7 +34,9 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
 
     def __init__(self, config: WhiteMatterConfig) -> None:
         super().__init__(config)
-        self.cache_prefix_slots = (0,) * config.num_pre_layers + (1,) + (0,) * config.num_post_layers
+        self.cache_prefix_slots = (
+            (0,) * config.num_pre_layers + (int(config.use_dummy_token),) + (0,) * config.num_post_layers
+        )
         self.pre_layers = nn.ModuleList([qwen3.Qwen3DecoderLayer(config, i) for i in range(config.num_pre_layers)])
         # The block owns the feedback layers, KV pool, dummy token, and RoPE.
         depth = config.num_hidden_layers - config.num_pre_layers - config.num_post_layers
@@ -56,6 +58,7 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
             pool,
             RotaryEmbedding(config.head_dim, config.rope_theta),
             num_passes=config.num_passes,
+            use_dummy_token=config.use_dummy_token,
             checkpoint_jacobi_passes=config.checkpoint_jacobi_passes,
             include_top_output=config.include_top_output,
         )
@@ -71,7 +74,7 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
     def _init_weights(self, module):
         """Initialize the feedback dummy token."""
         super()._init_weights(module)
-        if module is self.block:
+        if module is self.block and module.dummy_token is not None:
             # HF guards nn.init calls so loading never overwrites a learned dummy.
             nn.init.zeros_(module.dummy_token)
 
@@ -94,6 +97,8 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
         mode = self.config.execution_mode
         if cache is not None:
             mode = "autoregressive" if cache.get_seq_length() else (self.config.prefill_mode or mode)
+            if cache.get_seq_length() and inputs_embeds.shape[1] > 1 and self.config.prefill_mode == "jacobi":
+                mode = "jacobi"
             if mode in {"cyclic", "jacobi"} and self.config.prefill_mode is None:
                 raise ValueError("set prefill_mode explicitly for iterative prefill followed by AR decoding")
         if cache is None and mode == "autoregressive" and not self.training and not torch.is_grad_enabled():
@@ -110,9 +115,13 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
             num_passes, num_gradient_passes = resolve_passes(
                 self.config.num_passes, num_passes, 0 if cache is not None else num_gradient_passes
             )
-            inputs_embeds, attention_mask, document_ids = prepare_decoder_inputs(
-                inputs_embeds, self.config, attention_mask, document_ids
-            )
+            if cache is not None and cache.get_seq_length():
+                # Cache.prepare already assigned document IDs across the prefix.
+                inputs_embeds = cast_residual(inputs_embeds, residual_dtype=self.config.residual_dtype)
+            else:
+                inputs_embeds, attention_mask, document_ids = prepare_decoder_inputs(
+                    inputs_embeds, self.config, attention_mask, document_ids
+                )
         else:
             inputs_embeds = cast_residual(inputs_embeds, residual_dtype=self.config.residual_dtype)
         ordinary_args = (
@@ -145,18 +154,33 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
         elif mode == "jacobi":
             if checkpoint_chunk_size:
                 raise ValueError("Jacobi execution does not support autoregressive checkpoint chunks")
+            prefix = 0
+            past = None
+            all_documents = document_ids
+            if cache is not None and cache.get_seq_length():
+                prefix = cache.get_seq_length() + int(self.config.use_dummy_token)
+                feedback = cache.layers[self.config.num_pre_layers]
+                past = tuple(
+                    t[..., :prefix, :].unflatten(1, (self.config.num_kv_channels, self.config.num_key_value_heads))
+                    for t in (feedback.keys, feedback.values)
+                )
+                all_documents = cache.document_ids
             result = self.block.forward_jacobi(
                 x,
                 num_passes=num_passes,
                 num_gradient_passes=num_gradient_passes,
-                document_ids=document_ids,
+                document_ids=all_documents,
                 output_final_state=cache is not None,
+                past_key_values=past,
+                position_ids=position_ids,
             )
             if cache is None:
                 x = result
             else:
                 x, final_state = result
-                cache.update(*(tensor.flatten(1, 2) for tensor in final_state), self.config.num_pre_layers)
+                cache.update(
+                    *(tensor[..., prefix:, :].flatten(1, 2) for tensor in final_state), self.config.num_pre_layers
+                )
         else:
             groups = self.config.cyclic_groups if cyclic_groups is None else cyclic_groups
             if type(groups) is not int or groups < 1:
@@ -203,7 +227,7 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
                 if state is None:
                     cache.update(*(tensor.flatten(1, 2) for tensor in final_state), self.config.num_pre_layers)
                 else:
-                    feedback.cumulative_length.fill_(x.shape[1] + 1)
+                    feedback.cumulative_length.fill_(x.shape[1] + int(self.config.use_dummy_token))
         return run_feedforward_layers(self.post_layers, x, **ordinary_args)
 
     def _forward_cached(self, x, cache, position_ids, document_ids):
@@ -211,8 +235,8 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
         seen, index = cache.get_seq_length(), self.config.num_pre_layers
         feedback = cache.layers[index]
         if not feedback.is_initialized or not seen:
-            dummy = self.block._project_dummy(x.shape[0])
-            cache.update(*(tensor.transpose(0, 1).flatten(1, 2) for tensor in dummy), index)
+            initial = self.block._initial_kv(x.shape[0])
+            cache.update(*(tensor.transpose(0, 1).flatten(1, 2) for tensor in initial), index)
         outputs = []
         for t in range(x.shape[1]):
             state = tuple(
@@ -221,17 +245,21 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
             )
             mask, lengths = None, cache.lengths(index, x.shape[0])
             if document_ids is not None:
-                keep = feedback_document_mask(cache.document_ids[:, : seen + t], document_ids[:, t : t + 1])
+                keep = feedback_document_mask(
+                    cache.document_ids[:, : seen + t],
+                    document_ids[:, t : t + 1],
+                    use_dummy_token=self.config.use_dummy_token,
+                )
                 if x.is_cuda and self.config._attn_implementation == "flash_attention_2":
                     key, value, lengths = pack_kv_cache(*state, keep)
                     state = key, value
                 else:
-                    mask = x.new_zeros(keep.shape).masked_fill(~keep, torch.finfo(x.dtype).min)[:, None, None]
+                    mask = x.new_zeros(keep.shape).masked_fill(~keep, float("-inf"))[:, None, None]
                     lengths = None
             output, key, value = self.block._run_token_layers(
                 x[:, t : t + 1],
                 state,
-                self.block.rotary_emb(x, position_ids[:, t : t + 1] + 1),
+                self.block.rotary_emb(x, position_ids[:, t : t + 1] + int(self.config.use_dummy_token)),
                 mask,
                 cache_seqlens=lengths,
             )

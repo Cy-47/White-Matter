@@ -60,6 +60,7 @@ def validate_recipe(recipe, path: str | Path) -> str:
             **PAPER_SMALL_MODEL,
             num_kv_channels=channels,
             include_top_output=False,
+            use_dummy_token=True,
             num_passes=3,
             prefill_mode="cyclic",
             router_prior=prior,

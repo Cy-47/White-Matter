@@ -55,3 +55,17 @@ python -m benchmarks.report outputs/benchmarks/<run-id> --csv outputs/table.csv
 ```
 
 The [benchmark guide](../benchmarks/README.md) documents training measurements, capacity search, profiling, and result files.
+
+### Strict-past attention and cached Jacobi prefill
+
+`use_dummy_token=False` is the WhiteMatter default. The KV cache then contains
+only real tokens; a query with no earlier tokens receives zero attention output.
+Set `use_dummy_token=True` for the learned leading dummy used by older checkpoints.
+
+With `prefill_mode="jacobi"`, a multi-token call with an existing cache runs Jacobi
+on the new tokens against the frozen cached prefix. A single-token continuation
+uses exact autoregressive decode. Each new query at offset `i` can read the `P`
+cached real tokens and the first `i` new tokens from the previous iteration.
+Only new K/V is appended after prefill; the existing prefix is preserved.
+Document boundaries still isolate independent prompts. Reset the cache when
+starting an unrelated prompt unless explicit document IDs establish that boundary.

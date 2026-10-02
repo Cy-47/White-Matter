@@ -6,17 +6,24 @@ from white_matter.blocks.decoder_layer import run_feedback_layers
 from white_matter.modules.precision import model_autocast_context
 
 
-def _chunk(block, x, keys, values, query_rope, key_rope, mask, return_output):
+def _chunk(block, x, keys, values, query_rope, key_rope, query_start, return_output, backend):
     # Batch is fixed within a benchmark; keep it distinct from symbolic prefix lengths.
     for tensor in (x, keys, values):
         torch._dynamo.mark_static(tensor, 0)
+    mask = None
+    if backend == "reference":
+        qpos = query_start + torch.arange(x.shape[1], device=x.device)
+        kpos = torch.arange(keys.shape[-2], device=x.device) - int(block.use_dummy_token)
+        mask = (kpos[None, :] < qpos[:, None])[None, None]
     hidden, states = run_feedback_layers(
         block.layers,
         x,
         keys.unbind(1),
         values.unbind(1),
         query_rope,
+        jacobi=mask is None,
         decode_key_mask=mask,
+        prefix_length=query_start,
         return_output=return_output,
         include_top_output=block.include_top_output,
     )
@@ -35,9 +42,7 @@ def forward_contiguous(
 ):
     """Publish each chunk after its layer sweep, preserving earlier-token visibility.
 
-    Slot zero is the dummy; token t writes slot t+1 and reads slots <=t.
-    FlashAttention's bottom-right causal mask on Q[start:end], KV[:end]
-    implements exactly this bound, including unequal query/key lengths.
+    Shared strict-causal attention handles both optional-dummy layouts.
     """
     if x.ndim != 3 or not 1 <= chunks <= x.shape[1] or num_passes < 1:
         raise ValueError("require nonempty inputs, 1 <= chunks <= length, and positive passes")
@@ -49,6 +54,7 @@ def forward_contiguous(
         raise ValueError("FlashAttention requires CUDA and flash_attention_2 layers")
     if block.training:
         raise ValueError("contiguous iteration is inference-only")
+    offset = int(block.use_dummy_token)
     length = x.shape[1]
     bounds = [i * length // chunks for i in range(chunks + 1)]
     query_rope, key_rope = block._prepare_rope(x)
@@ -59,30 +65,23 @@ def forward_contiguous(
             key_rope,
             dummy_token=block.dummy_token,
         )
-        masks = [None] * chunks
-        if backend == "reference":
-            masks = [
-                (torch.arange(end, device=x.device)[None, :] <= torch.arange(start, end, device=x.device)[:, None])[
-                    None, None
-                ]
-                for start, end in zip(bounds[:-1], bounds[1:], strict=True)
-            ]
         for iteration in range(num_passes):
             observe = on_pass is not None or iteration == num_passes - 1
             outputs = []
-            for index, (start, end) in enumerate(zip(bounds[:-1], bounds[1:], strict=True)):
+            for start, end in zip(bounds[:-1], bounds[1:], strict=True):
                 hidden, key, value = run_chunk(
                     block,
                     x[:, start:end],
-                    keys[..., :end, :],
-                    values[..., :end, :],
+                    keys[..., : end + offset, :],
+                    values[..., : end + offset, :],
                     tuple(t[:, start:end] for t in query_rope),
-                    tuple(t[:, start + 1 : end + 1] for t in key_rope),
-                    masks[index],
+                    tuple(t[:, start + offset : end + offset] for t in key_rope),
+                    start,
                     observe,
+                    backend,
                 )
-                keys[..., start + 1 : end + 1, :].copy_(key)
-                values[..., start + 1 : end + 1, :].copy_(value)
+                keys[..., start + offset : end + offset, :].copy_(key)
+                values[..., start + offset : end + offset, :].copy_(value)
                 if observe:
                     outputs.append(hidden)
             if observe:

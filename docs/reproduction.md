@@ -226,3 +226,8 @@ the final feedback layer output. The paper recipes and checkpoint importer set
 this explicitly. When loading older checkpoints whose configuration lacks this
 field, pass `include_top_output=False` to `from_pretrained`; the new default
 changes the pool and router parameter shapes.
+
+WhiteMatter also defaults to `use_dummy_token=False`, using strict-past attention
+without a learned initial slot. Paper and study reproduction recipes retain
+`use_dummy_token=True`. Pass that option explicitly when loading older
+checkpoints whose saved configuration does not contain it.

@@ -12,7 +12,7 @@ from white_matter.layers import WhiteMatterAttention
 from white_matter.modules import GatedMLP, KVPool, RotaryEmbedding
 
 
-def make_block(hidden_size=32, num_layers=4, num_kv_channels=2):
+def make_block(hidden_size=32, num_layers=4, num_kv_channels=2, *, use_dummy_token=False):
     layers = [
         FeedbackDecoderLayer(
             hidden_size, WhiteMatterAttention(hidden_size, 4, 8), GatedMLP(hidden_size, hidden_size * 2)
@@ -20,7 +20,7 @@ def make_block(hidden_size=32, num_layers=4, num_kv_channels=2):
         for i in range(num_layers)
     ]
     pool = KVPool(hidden_size, 2, 8, num_layers + 1, num_kv_channels, router_prior="cyclic:0.25", router_layer_stride=2)
-    return WhiteMatterBlock(layers, pool, RotaryEmbedding(8, 10_000.0), num_passes=3)
+    return WhiteMatterBlock(layers, pool, RotaryEmbedding(8, 10_000.0), num_passes=3, use_dummy_token=use_dummy_token)
 
 
 def main():
@@ -46,7 +46,7 @@ def main():
         first, state = block.forward_recurrent(conditioning[:, :8])
         last, state = block.forward_recurrent(conditioning[:, 8:], initial_state=state)
         assert torch.cat((first, last), dim=1).shape == conditioning.shape
-        assert state[0].shape[-2] == conditioning.shape[1] + 1  # dummy token plus real tokens
+        assert state[0].shape[-2] == conditioning.shape[1] + int(block.use_dummy_token)
 
 
 if __name__ == "__main__":

@@ -11,9 +11,9 @@ from white_matter._typing import compiler_disable
 from white_matter.modules.documents import document_position_ids, feedback_document_mask
 from white_matter.modules.kv_pool import KVPool
 from white_matter.modules.rotary import PositionEmbedding
+from white_matter.ops import StrictCausalMetadata
 
 from ._execution import autoregressive, cyclic, jacobi
-from ._execution.metadata import prepare_feedback_metadata
 from .decoder_layer import FeedbackDecoderLayer, run_feedback_layers
 
 
@@ -33,6 +33,7 @@ class WhiteMatterBlock(nn.Module):
         rotary_emb: PositionEmbedding,
         *,
         num_passes: int = 3,
+        use_dummy_token: bool = False,
         checkpoint_jacobi_passes: bool = False,
         include_top_output: bool = True,
     ) -> None:
@@ -51,7 +52,12 @@ class WhiteMatterBlock(nn.Module):
             tuple[int, int, str, torch.dtype],
             tuple[list[tuple[torch.Tensor, torch.Tensor]], list[tuple[torch.Tensor, torch.Tensor]]],
         ] = {}
-        self.dummy_token = nn.Parameter(torch.zeros(kv_pool.hidden_size))
+        if type(use_dummy_token) is not bool:
+            raise ValueError("use_dummy_token must be boolean")
+        self.use_dummy_token = use_dummy_token
+        self.dummy_token = nn.Parameter(torch.zeros(kv_pool.hidden_size)) if use_dummy_token else None
+        for layer in layers:
+            layer.self_attn.use_dummy_token = use_dummy_token
         self.layers = nn.ModuleList(layers)
         self.kv_pool = kv_pool
         self.rotary_emb = rotary_emb
@@ -61,14 +67,15 @@ class WhiteMatterBlock(nn.Module):
     ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
         B, T, _ = x.shape
         device = x.device
-        # Slot 0 holds the learned dummy token; real token t is stored at slot t+1.
+        offset = int(self.use_dummy_token)
+        # Real positions follow the optional leading dummy slot.
         if document_ids is None:
-            q_pos = torch.arange(1, T + 1, device=device).unsqueeze(0)
-            k_pos = torch.arange(T + 1, device=device).unsqueeze(0)
+            q_pos = torch.arange(offset, T + offset, device=device).unsqueeze(0)
+            k_pos = torch.arange(T + offset, device=device).unsqueeze(0)
         else:
-            # Real tokens start at position 1 behind the dummy token.
-            q_pos = document_position_ids(document_ids) + 1
-            k_pos = torch.cat([q_pos.new_zeros(B, 1), q_pos], dim=1)
+            # Document-relative real positions follow the optional dummy.
+            q_pos = document_position_ids(document_ids) + offset
+            k_pos = torch.cat([q_pos.new_zeros(B, offset), q_pos], dim=1)
         return self.rotary_emb(x, q_pos), self.rotary_emb(x, k_pos)
 
     forward = cyclic.forward_cyclic
@@ -81,28 +88,31 @@ class WhiteMatterBlock(nn.Module):
         layer_hidden_states: torch.Tensor,
         q_pos_emb: tuple[torch.Tensor, torch.Tensor],
         k_pos_emb: tuple[torch.Tensor, torch.Tensor],
-        document_ids: torch.Tensor | None = None,
+        past_key_values: tuple[torch.Tensor, torch.Tensor] | None = None,
+        metadata: StrictCausalMetadata | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Project (B,S,T,D) mixer sources, then sweep with fixed K/V."""
         K, V = self.kv_pool.project_sequence(
-            layer_hidden_states.transpose(1, 2).contiguous(), k_pos_emb, dummy_token=self.dummy_token
+            layer_hidden_states.transpose(1, 2).contiguous(),
+            k_pos_emb,
+            dummy_token=self.dummy_token if past_key_values is None else None,
         )
+        prefix_length = 0
+        if past_key_values is not None:
+            prefix_length = past_key_values[0].shape[-2] - int(self.use_dummy_token)
+            K, V = (torch.cat((past, new), dim=3) for past, new in zip(past_key_values, (K, V), strict=True))
         # Preselect contiguous channel views once, shared by all their readers.
-        keys = tuple(k[..., :-1, :].contiguous() for k in K.unbind(1))
-        values = tuple(v[..., :-1, :].contiguous() for v in V.unbind(1))
-        metadata = None
-        if document_ids is not None:
-            slots = torch.arange(x_in.shape[1], device=x_in.device)
-            metadata = prepare_feedback_metadata(document_ids, [slots], x_in.shape[1])[0]
+        keys = tuple(k.contiguous() for k in K.unbind(1))
+        values = tuple(v.contiguous() for v in V.unbind(1))
         hidden, states = run_feedback_layers(
             self.layers,
             x_in,
             keys,
             values,
             q_pos_emb,
-            document_ids=document_ids,
             metadata=metadata,
             jacobi=True,
+            prefix_length=prefix_length,
             include_top_output=self.include_top_output,
         )
         return torch.stack(states, dim=1), hidden
@@ -148,9 +158,11 @@ class WhiteMatterBlock(nn.Module):
         B, _, _, N, _ = K_channel_past.shape
         q_pos_emb = self.rotary_emb(x_new, q_pos.view(B, 1).to(device=x_new.device, dtype=torch.long))
         add_mask = x_new.new_zeros((B, 1, 1, N)).masked_fill(
-            ~valid_mask.view(B, 1, 1, N).to(x_new.device), torch.finfo(x_new.dtype).min
+            ~valid_mask.view(B, 1, 1, N).to(x_new.device), float("-inf")
         )
         output, K_new, V_new = self._run_token_layers(x_new, (K_channel_past, V_channel_past), q_pos_emb, add_mask)
+        if not self.use_dummy_token:
+            return output, K_new.transpose(0, 1), V_new.transpose(0, 1)
         reset_mask = reset_after.to(device=x_new.device, dtype=torch.bool).view(B, 1, 1, 1, 1)
         return (
             output,
@@ -177,12 +189,18 @@ class WhiteMatterBlock(nn.Module):
             include_top_output=self.include_top_output,
             decode_key_mask=attention_mask,
             cache_seqlens=cache_seqlens,
+            committed_prefix=True,
         )
         keys, values = self.kv_pool.project_token(layer_inputs, position_embeddings)
         return x, keys, values
 
-    def _project_dummy(self, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Project the learned dummy token at position zero: (k,B,H,1,d)."""
+    def _initial_kv(self, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Initialize (k,B,H,N,d) history; N is one with a dummy, otherwise zero."""
+        if self.dummy_token is None:
+            source = self.kv_pool.k_proj_weight
+            empty = source.new_empty(batch_size, 0, self.kv_pool.hidden_size)
+            positions = torch.empty(1, 0, device=source.device, dtype=torch.long)
+            return self.kv_pool.project_token([empty] * self.kv_pool.num_layers, self.rotary_emb(empty, positions))
         dummy = self.dummy_token.view(1, 1, -1).expand(batch_size, 1, -1)
         positions = torch.zeros(1, 1, device=dummy.device, dtype=torch.long)
         return self.kv_pool.project_token([dummy] * self.kv_pool.num_layers, self.rotary_emb(dummy, positions))
@@ -196,11 +214,11 @@ class WhiteMatterBlock(nn.Module):
         attention_mask: torch.Tensor | None = None,
         document_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        """Continue exact AR from (B,k,H,N,d) K/V, including the leading dummy token.
+        """Continue exact AR from (B,k,H,N,d) K/V, including the optional leading dummy token.
 
-        Positions use WM's convention (first real token is 1). An optional
-        boolean mask has shape (B,T,N+T); it includes the dummy token and new tokens.
-        Alternatively, document_ids labels all past/new token slots (B,N-1+T),
+        Positions start at int(use_dummy_token). An optional
+        boolean mask has shape (B,T,N+T); it includes any dummy slot and new tokens.
+        Alternatively, document_ids labels all real past/new token slots (B,N-int(use_dummy_token)+T),
         excluding the dummy token; negative IDs mark padding. Document masks are built
         one token at a time to avoid a quadratic prefill allocation.
         Only committed prefix slots are read. Returned state includes every
@@ -209,16 +227,17 @@ class WhiteMatterBlock(nn.Module):
         if x.ndim != 3 or x.shape[1] == 0:
             raise ValueError("recurrent inputs must be nonempty (B,T,D) tensors")
         if initial_state is None:
-            keys, values = self._project_dummy(x.shape[0])
+            keys, values = self._initial_kv(x.shape[0])
             initial_state = keys.transpose(0, 1), values.transpose(0, 1)
         keys, values = initial_state
         if keys.ndim != 5 or keys.shape != values.shape or keys.shape[:2] != (x.shape[0], self.num_kv_channels):
             raise ValueError("initial_state requires matching (B,k,H,N,d) K/V")
-        if keys.shape[-2] < 1:
+        offset = int(self.use_dummy_token)
+        if keys.shape[-2] < offset:
             raise ValueError("initial_state must include the dummy token")
         prefix = keys.shape[-2]
         if document_ids is not None and (
-            document_ids.shape != (x.shape[0], prefix - 1 + x.shape[1])
+            document_ids.shape != (x.shape[0], prefix - offset + x.shape[1])
             or document_ids.dtype not in (torch.int32, torch.int64)
         ):
             raise ValueError("document_ids must label the past and new token slots, excluding the dummy token")
@@ -231,7 +250,7 @@ class WhiteMatterBlock(nn.Module):
         if attention_mask is not None and (
             attention_mask.shape != (x.shape[0], x.shape[1], prefix + x.shape[1]) or attention_mask.dtype != torch.bool
         ):
-            raise ValueError("attention_mask must be boolean (B,T,N+T), including the dummy token")
+            raise ValueError("attention_mask must be boolean (B,T,N+T), including any dummy slot")
         outputs = []
         for t in range(x.shape[1]):
             token = x[:, t : t + 1]
@@ -240,11 +259,13 @@ class WhiteMatterBlock(nn.Module):
             if attention_mask is not None:
                 keep = attention_mask[:, t : t + 1, : prefix + t].unsqueeze(1)
             if document_ids is not None:
-                document = document_ids[:, prefix - 1 + t : prefix + t]
-                document_keep = feedback_document_mask(document_ids[:, : prefix + t - 1], document)[:, None, None]
+                document = document_ids[:, prefix - offset + t : prefix - offset + t + 1]
+                document_keep = feedback_document_mask(
+                    document_ids[:, : prefix + t - offset], document, use_dummy_token=self.use_dummy_token
+                )[:, None, None]
                 keep = document_keep if keep is None else keep & document_keep
             if keep is not None:
-                mask = x.new_zeros(keep.shape).masked_fill(~keep, torch.finfo(x.dtype).min)
+                mask = x.new_zeros(keep.shape).masked_fill(~keep, float("-inf"))
             hidden, (keys, values) = self._autoregressive_step(token, (keys, values), position_ids[:, t : t + 1], mask)
             outputs.append(hidden)
         return torch.cat(outputs, dim=1), (keys, values)

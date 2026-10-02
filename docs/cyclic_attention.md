@@ -152,3 +152,12 @@ unless measurements justify the additional variants.
 
 The [benchmark guide](../benchmarks/README.md) describes the existing attention
 benchmark. GPU correctness tests live in `tests/gpu/test_cyclic_attention.py`.
+
+### Strict-past keys without a dummy
+
+Set `strict_past=True` to read only real keys whose position is strictly less
+than `query_offset + query_stride * query_index`. Empty attention rows return
+zero. For packed inputs, call `prepare_cyclic_attention_metadata` with
+`use_dummy_token=False` and real-token document labels without a dummy sentinel.
+The default `strict_past=False` preserves the inclusive slot bound used by the
+dummy-shifted layout. Both reference and TileLang backends support these modes.

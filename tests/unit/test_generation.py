@@ -35,6 +35,7 @@ def make_model(device, *, k=2, surrounding=0, prefill="autoregressive", residual
     torch.manual_seed(73)
     config = AutoConfig.for_model(
         "white_matter",
+        use_dummy_token=True,
         vocab_size=101,
         hidden_size=128 if device == "cuda" else 32,
         intermediate_size=192 if device == "cuda" else 64,

@@ -59,11 +59,11 @@ def forward_autoregressive(
     # A document starting at token s reads its dummy token from slot s: the preceding
     # token appends a dummy token instead of its own K/V when reset_after is true.
     valid_start = start_markers.cummax(dim=1).values
-    q_pos = token_index - valid_start + 1
+    q_pos = token_index - valid_start + int(self.use_dummy_token)
     reset_after = torch.zeros((B, T), device=device, dtype=torch.bool)
     reset_after[:, :-1] = is_start[:, 1:]
 
-    keys, values = self._project_dummy(B)
+    keys, values = self._initial_kv(B)
     K_state, V_state = keys.transpose(0, 1), values.transpose(0, 1)
     # Reset channels are explicit checkpoint inputs.  Clone them so checkpoint
     # boundaries do not receive aliased state/reset arguments while both

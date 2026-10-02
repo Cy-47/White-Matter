@@ -28,6 +28,30 @@ def tiny_config(architecture="vanilla", **kwargs):
     )
 
 
+@pytest.mark.parametrize("architecture", ["white_matter", "lckv"])
+@pytest.mark.parametrize("training", [False, True])
+def test_jacobi_reuses_document_schedule_and_preserves_isolation(monkeypatch, architecture, training):
+    from unittest.mock import Mock
+
+    from white_matter.blocks import lckv
+    from white_matter.blocks._execution import jacobi
+    from white_matter.layers import white_matter
+    from white_matter.ops import prepare_strict_causal_metadata
+
+    prepare = Mock(wraps=prepare_strict_causal_metadata)
+    for module in (jacobi, lckv, white_matter):
+        monkeypatch.setattr(module, "prepare_strict_causal_metadata", prepare)
+    model = AutoModelForCausalLM.from_config(tiny_config(architecture, execution_mode="jacobi", num_passes=3)).train(
+        training
+    )
+    ids = torch.tensor([[1, 2, 100, 3, 4]])
+    with torch.set_grad_enabled(training):
+        actual = model(ids, use_cache=False).logits
+        assert prepare.call_count == 1
+        expected = torch.cat([model(part, use_cache=False).logits for part in (ids[:, :3], ids[:, 3:])], dim=1)
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+
+
 def test_heldout_uses_the_public_document_masked_forward():
     torch.manual_seed(7)
     model = AutoModelForCausalLM.from_config(tiny_config()).eval()
@@ -74,18 +98,25 @@ def test_short_cyclic_prompt_matches_causally_padded_prompt():
 
 
 @pytest.mark.parametrize("include_top_output", [False, True])
-def test_exact_ar_training_recomputation_matches_uncheckpointed_reference(include_top_output):
+@pytest.mark.parametrize("dummy", [False, True])
+def test_exact_ar_training_recomputation_matches_uncheckpointed_reference(include_top_output, dummy):
     from training.forward import TrainingForward
     from training.losses import checkpointed_linear_cross_entropy, lm_cross_entropy_from_hidden
     from white_matter.modules.documents import document_ids_from_eos
 
     torch.manual_seed(93)
     model = AutoModelForCausalLM.from_config(
-        tiny_config("white_matter", execution_mode="autoregressive", include_top_output=include_top_output)
+        tiny_config(
+            "white_matter",
+            execution_mode="autoregressive",
+            include_top_output=include_top_output,
+            use_dummy_token=dummy,
+        )
     ).train()
     # Exercise a learned boundary state away from RMSNorm's zero-input singular scale.
     with torch.no_grad():
-        model.model.decoder.block.dummy_token.normal_(std=0.02)
+        if model.model.decoder.block.dummy_token is not None:
+            model.model.decoder.block.dummy_token.normal_(std=0.02)
     reference = copy.deepcopy(model)
     ids = torch.tensor([[1, 100, 2, 3, 4, 100, 5], [6, 7, 100, 8, 100, 9, 10]])
 

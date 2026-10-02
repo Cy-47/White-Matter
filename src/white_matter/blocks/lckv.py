@@ -12,12 +12,17 @@ from white_matter.modules.documents import document_position_ids
 from white_matter.modules.kv_pool import KVPool
 from white_matter.modules.precision import model_autocast_context
 from white_matter.modules.rotary import PositionEmbedding
+from white_matter.ops import StrictCausalMetadata, prepare_strict_causal_metadata
 
 from ._execution import jacobi, resolve_passes
 from .decoder_layer import FeedbackDecoderLayer, run_feedback_layers
 
 
 class LCKVBlock(nn.Module):
+    use_dummy_token = False
+    dummy_token: None = None
+    checkpoint_jacobi_passes = False
+
     def __init__(
         self,
         layers: Sequence[FeedbackDecoderLayer],
@@ -54,11 +59,14 @@ class LCKVBlock(nn.Module):
         layer_hidden_states: torch.Tensor,
         q_pos_emb: tuple[torch.Tensor, torch.Tensor],
         k_pos_emb: tuple[torch.Tensor, torch.Tensor],
-        document_ids: torch.Tensor | None = None,
+        past_key_values: tuple[torch.Tensor, torch.Tensor] | None = None,
+        metadata: StrictCausalMetadata | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if past_key_values is not None:
+            raise ValueError("cached Jacobi continuation requires WhiteMatterBlock")
         keys, values = self.kv_pool.project_sequence(layer_hidden_states.transpose(1, 2).contiguous(), k_pos_emb)
         hidden, states = run_feedback_layers(
-            self.layers, x_in, (keys[:, 0],), (values[:, 0],), q_pos_emb, document_ids=document_ids
+            self.layers, x_in, (keys[:, 0],), (values[:, 0],), q_pos_emb, metadata=metadata
         )
         return torch.stack(states, dim=1), hidden
 
@@ -105,6 +113,7 @@ class LCKVBlock(nn.Module):
             )
         passes, _ = resolve_passes(self.num_passes, num_passes, num_gradient_passes)
         q_pos_emb, k_pos_emb = self._prepare_rope(x, document_ids)
+        metadata = None if document_ids is None else prepare_strict_causal_metadata(document_ids, x.shape[1])
         source = x
         with torch.no_grad(), model_autocast_context(x.device):
             for _ in range(passes):
@@ -115,7 +124,7 @@ class LCKVBlock(nn.Module):
                 hidden = x
                 for layer in self.layers:
                     source = hidden
-                    hidden = layer(hidden, keys[:, 0], values[:, 0], q_pos_emb, document_ids=document_ids)
+                    hidden = layer(hidden, keys[:, 0], values[:, 0], q_pos_emb, metadata=metadata)
                 del keys, values
             if output_final_state:
                 expanded = source.unsqueeze(2).expand(-1, -1, len(self.layers), -1)

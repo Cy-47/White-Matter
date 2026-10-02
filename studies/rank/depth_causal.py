@@ -114,6 +114,7 @@ class DepthCausalConfig(WhiteMatterConfig):
         if mode != "depth_causal":
             raise ValueError("depth-causal study requires depth_causal execution")
         kwargs.setdefault("include_top_output", False)
+        kwargs.setdefault("use_dummy_token", True)
         if kwargs["include_top_output"]:
             raise ValueError("depth-causal study requires include_top_output=False")
         kwargs.setdefault("num_passes", 1)

@@ -137,9 +137,9 @@ def build_program(
                         T.copy(scores_max, scores_max_prev)
                         T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                         for i in T.Parallel(block_M):
-                            scores_scale[i] = T.exp2((scores_max_prev[i] - scores_max[i]) * scale)
+                            scores_scale[i] = T.exp2((scores_max_prev[i] - T.max(scores_max[i], -1e30)) * scale)
                         for i, j in T.Parallel(block_M, block_N):
-                            acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+                            acc_s[i, j] = T.exp2(acc_s[i, j] * scale - T.max(scores_max[i], -1e30) * scale)
                         T.reduce_sum(acc_s, scores_sum, dim=1)
                         for i in T.Parallel(block_M):
                             logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
@@ -152,12 +152,14 @@ def build_program(
                         T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
             for i, j in T.Parallel(block_M, D):
-                acc_o[i, j] /= logsum[i]
+                acc_o[i, j] /= T.max(logsum[i], 1.0)
             T.copy(acc_o, O_shared)
             T.copy(O_shared, Output[bz, bx * block_M : (bx + 1) * block_M, by, :])
 
             for i in T.Parallel(block_M):
                 if bx * block_M + i < Q_LEN:
-                    Lse[bz, by, bx * block_M + i] = scores_max[i] * inv_sqrt_d + T.log(logsum[i])
+                    Lse[bz, by, bx * block_M + i] = T.if_then_else(
+                        logsum[i] > 0, scores_max[i] * inv_sqrt_d + T.log(logsum[i]), T.infinity(_LSE_DTYPE)
+                    )
 
     return main

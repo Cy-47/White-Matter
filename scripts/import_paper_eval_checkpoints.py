@@ -52,7 +52,13 @@ SPECS = {
     "white_matter_k14": (
         WhiteMatterConfig,
         LARGE,
-        {"include_top_output": False, "num_kv_channels": 14, "num_passes": 3, "prefill_mode": "cyclic"},
+        {
+            "use_dummy_token": True,
+            "include_top_output": False,
+            "num_kv_channels": 14,
+            "num_passes": 3,
+            "prefill_mode": "cyclic",
+        },
     ),
 }
 

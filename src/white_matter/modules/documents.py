@@ -53,7 +53,7 @@ def block_causal_additive_mask(document_ids: torch.Tensor, dtype: torch.dtype = 
     return mask.masked_fill_(~(same & causal).unsqueeze(1), torch.finfo(dtype).min)
 
 
-def feedback_document_mask(past: torch.Tensor, current: torch.Tensor) -> torch.Tensor:
+def feedback_document_mask(past: torch.Tensor, current: torch.Tensor, *, use_dummy_token: bool = True) -> torch.Tensor:
     """Visible committed tokens, including the always-visible leading dummy."""
     same = (past == current) & (current >= 0)
-    return torch.cat((torch.ones_like(current, dtype=torch.bool), same), dim=1)
+    return torch.cat((torch.ones_like(current, dtype=torch.bool), same), dim=1) if use_dummy_token else same

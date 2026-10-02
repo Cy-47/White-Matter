@@ -20,7 +20,10 @@ def reference(block, x, passes, chunks):
         for c in range(chunks):
             start, end = c * length // chunks, (c + 1) * length // chunks
             key, value = block.kv_pool.project_sequence(states, krope, dummy_token=block.dummy_token)
-            mask = (torch.arange(length + 1)[None, :] <= torch.arange(start, end)[:, None]).to(x.device)
+            mask = (
+                torch.arange(length + int(block.use_dummy_token))[None, :]
+                < (torch.arange(start, end)[:, None] + int(block.use_dummy_token))
+            ).to(x.device)
             hidden = x[:, start:end]
             fresh = []
             for layer_index, layer in enumerate(block.layers):
