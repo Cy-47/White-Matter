@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torch.nn as nn
@@ -42,8 +42,10 @@ class FeedbackDecoderLayer(nn.Module):
         query_stride: int | None = None,
         query_offset: int = 0,
         cache_seqlens: torch.Tensor | None = None,
+        static_cache: bool = False,
         committed_prefix: bool = False,
         jacobi: bool = False,
+        jacobi_backend: Literal["auto", "reference", "flash_attention_2"] = "auto",
         prefix_length: int = 0,
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.self_attn(
@@ -57,8 +59,10 @@ class FeedbackDecoderLayer(nn.Module):
             query_stride=query_stride,
             query_offset=query_offset,
             cache_seqlens=cache_seqlens,
+            static_cache=static_cache,
             committed_prefix=committed_prefix,
             jacobi=jacobi,
+            jacobi_backend=jacobi_backend,
             prefix_length=prefix_length,
         )
         mlp_input = self.post_attention_layernorm(hidden_states)

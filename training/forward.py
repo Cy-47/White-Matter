@@ -5,6 +5,7 @@ from torch import nn
 
 from training.losses import lm_cross_entropy_from_hidden
 from white_matter.modules.documents import document_ids_from_eos
+from white_matter.modules.precision import cast_residual
 
 
 class TrainingForward(nn.Module):
@@ -32,6 +33,10 @@ class TrainingForward(nn.Module):
         return self.ar_graph(hidden, document_ids)
 
     def forward(self, hidden_states, num_passes: int, num_gradient_passes: int, *, token_ids, compute_ce=True):
+        if hidden_states is None:
+            hidden_states = cast_residual(
+                self.model.model.embed_tokens(token_ids), residual_dtype=self.model.config.residual_dtype
+            )
         separator = self.model.config.document_separator_token_id
         document_ids = None if separator is None else document_ids_from_eos(token_ids, separator)
         if self.ar_graph is not None and hidden_states.shape == self.ar_graph_shape and self.training:

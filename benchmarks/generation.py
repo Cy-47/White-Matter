@@ -18,6 +18,7 @@ from benchmarks._measurement import (
     summarize,
 )
 from benchmarks._runner import add_run_arguments, run_sweep, run_worker, validate_run
+from white_matter.compilation import add_compile_argument
 from white_matter.models import register_models
 from white_matter.models.generation import DecodeGraph
 from white_matter.models.generation import prefill as prefill_forward
@@ -66,7 +67,7 @@ def benchmark(args):
         from training.recipes import load_recipe
 
         recipe = load_recipe(args.model)
-        recipe.model._attn_implementation = "flash_attention_2"
+        recipe.model._attn_implementation = args.attention_backend
         model = AutoModelForCausalLM.from_config(recipe.model)
         # Match mixed inference storage: matrices BF16, norms and gains FP32.
         from white_matter.modules import KVPool
@@ -82,7 +83,7 @@ def benchmark(args):
         model = AutoModelForCausalLM.from_pretrained(
             args.model,
             dtype=getattr(torch, args.parameter_dtype),
-            attn_implementation="flash_attention_2",
+            attn_implementation=args.attention_backend,
         )
     model = model.cuda().eval()
     # EOS is an ordinary token in this fixed-length, single-document workload.
@@ -164,18 +165,18 @@ def benchmark(args):
     torch.cuda.synchronize()
     setup_seconds = time.perf_counter() - setup
     torch.cuda.empty_cache()
+    compiler_guard = torch.compiler.set_stance("fail_on_recompile") if args.compiled else nullcontext()
     if args.profile:
         with (
             torch.profiler.profile(
                 activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
                 record_shapes=True,
             ) as profile,
-            torch.compiler.set_stance("fail_on_recompile"),
+            compiler_guard,
         ):
             trial()
         profile.export_chrome_trace(str(args.profile))
         return {"trace": str(args.profile), "environment": environment(0), "config": model.config.to_dict()}
-    compiler_guard = torch.compiler.set_stance("fail_on_recompile") if args.compiled else nullcontext()
     with MemoryMonitor() as monitor, compiler_guard:
         samples, token_digest = collect_trials(trial, args.repetitions)
     memory = {key: max(s[key] for s in samples) for key in samples[0] if key.endswith("_bytes")}
@@ -213,7 +214,7 @@ def main() -> None:
     parser.add_argument("--tokens", type=int, default=128, help="Includes the first token produced by prefill")
     parser.add_argument("--parameter-dtype", choices=["float32", "bfloat16"], default="bfloat16")
     parser.add_argument("--cuda-graph", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--compiled", action=argparse.BooleanOptionalAction, default=True)
+    add_compile_argument(parser, "--compiled")
     parser.add_argument("--num-splits", type=int, default=0, help="FA decode splits; zero keeps automatic selection")
     parser.add_argument(
         "--prefill-batch-size", type=int, default=1, help="Prefill microbatch; zero uses the resident batch"
@@ -235,6 +236,7 @@ def main() -> None:
         module="benchmarks.generation",
         workload_keys=(
             "phase",
+            "attention_backend",
             "tokens",
             "warmups",
             "repetitions",

@@ -14,8 +14,12 @@
 
 """Ordinary attention dispatch for feedback readers, independent of HF."""
 
+from typing import cast
+
 import torch
 import torch.nn.functional as F
+
+from white_matter.ops.flash_attention import TorchFlashDense, can_use_torch_flash, torch_flash_decode
 
 
 def pack_kv_cache(
@@ -47,6 +51,7 @@ def attention_forward(
     implementation: str,
     is_causal: bool = True,
     cache_seqlens: torch.Tensor | None = None,
+    static_cache: bool = False,
     num_splits: int = 0,
 ) -> torch.Tensor:
     repeats = query.shape[1] // key.shape[1]
@@ -70,6 +75,21 @@ def attention_forward(
             softmax_scale=scaling,
             causal=is_causal,
         )
+    if (
+        implementation == "sdpa"
+        and cache_seqlens is not None
+        and attention_mask is None
+        and query.is_cuda
+        and query.dtype in (torch.float16, torch.bfloat16)
+        and query.shape[2] == 1
+        and key.shape[2] > 0
+        and not (torch.is_grad_enabled() and any(t.requires_grad for t in (query, key, value)))
+        and can_use_torch_flash(*(t.transpose(1, 2) for t in (query, key, value)))
+    ):
+        result = torch_flash_decode(
+            query, key, value, cache_seqlens.to(torch.int32), scaling, static_cache=static_cache
+        )
+        return result
     if cache_seqlens is not None:
         slots = torch.arange(key.shape[-2], device=key.device)
         visible = slots[None, :] < cache_seqlens[:, None]
@@ -80,6 +100,20 @@ def attention_forward(
             query_slots = cache_seqlens[:, None] - query.shape[-2] + torch.arange(query.shape[-2], device=query.device)
             keep = keep & (slots[None, None, None, :] <= query_slots[:, None, :, None])
         attention_mask = query.new_zeros(keep.shape).masked_fill(~keep, float("-inf"))
+    if (
+        implementation == "sdpa"
+        and attention_mask is None
+        and query.is_cuda
+        and query.dtype in (torch.float16, torch.bfloat16)
+        and (not is_causal or query.shape[2] == key.shape[2])
+        and torch.is_grad_enabled()
+        and any(t.requires_grad for t in (query, key, value))
+        and can_use_torch_flash(*(t.transpose(1, 2) for t in (query, key, value)))
+    ):
+        dim = query.shape[-1]
+        if dim % 8:
+            query, key, value = (F.pad(t, (0, 8 - dim % 8)) for t in (query, key, value))
+        return cast(torch.Tensor, TorchFlashDense.apply(query, key, value, scaling, is_causal))[..., :dim]
     if implementation == "sdpa":
         if attention_mask is not None:
             key, value = _repeat_kv(key, repeats), _repeat_kv(value, repeats)
@@ -93,7 +127,7 @@ def attention_forward(
             dropout_p=0.0,
             enable_gqa=attention_mask is None,
         )
-        return result.transpose(1, 2).contiguous()
+        return result.transpose(1, 2)
     if implementation == "eager":
         key, value = _repeat_kv(key, repeats), _repeat_kv(value, repeats)
         scores = query @ key.transpose(2, 3) * scaling

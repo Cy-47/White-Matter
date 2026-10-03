@@ -20,6 +20,7 @@ from benchmarks._measurement import (
     write_json,
 )
 from benchmarks.report import summarize_run
+from white_matter.compilation import execution_policy, warn_eager
 
 
 def input_files(model):
@@ -44,6 +45,7 @@ def worker_command(module, path, world_size):
 
 
 def add_run_arguments(parser):
+    parser.add_argument("--attention-backend", choices=["sdpa", "flash_attention_2"], default="sdpa")
     parser.add_argument("--output", type=Path, default=Path("outputs"))
     parser.add_argument("--batch-sizes", nargs="+", type=int, default=[1, 2, 4, 8, 16, 32, 64])
     parser.add_argument("--prompt-lengths", "--sequence-lengths", nargs="+", type=int, default=[2048])
@@ -83,6 +85,8 @@ def validate_run(parser, args):
         len(args.models) != 1 or len(args.batch_sizes) != 1 or len(args.prompt_lengths) != 1 or args.memory_budget_gib
     ):
         parser.error("profile requires one model/batch/length and no capacity search")
+    if not args.compiled:
+        warn_eager()
 
 
 def run_worker(path: Path, benchmark) -> None:
@@ -98,7 +102,12 @@ def run_worker(path: Path, benchmark) -> None:
     rank = int(os.environ.get("RANK", "0"))
     distributed = case["workload"].get("world_size", 1) > 1
     destination = path.parent / "ranks" / f"{path.stem}.rank{rank}.json" if distributed else path
-    record_case(destination, case, lambda: benchmark(argparse.Namespace(**case["workload"])), verify)
+
+    def execute():
+        with execution_policy(case["workload"].get("compiled", True)):
+            return benchmark(argparse.Namespace(**case["workload"]))
+
+    record_case(destination, case, execute, verify)
     if case["status"] == "failed" or (distributed and case["status"] == "cuda_oom"):
         raise SystemExit(1)
     if distributed and rank == 0:

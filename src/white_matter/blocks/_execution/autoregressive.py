@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
+from white_matter._typing import compiler_disable, eager_loop
 from white_matter.modules.documents import document_start_mask
 
 if TYPE_CHECKING:
     from white_matter.blocks.white_matter import WhiteMatterBlock
 
 from .checkpointing import _OffloadedPackedARCheckpoint
+
+
+@compiler_disable
+def _offloaded_checkpoint(*args: Any) -> torch.Tensor:
+    # CPU offload and explicit reverse-mode scheduling retain their validated
+    # packed-AR backend. Tensor steps compile independently inside this driver.
+    return cast(torch.Tensor, _OffloadedPackedARCheckpoint.apply(*args))
 
 
 def forward_autoregressive(
@@ -72,7 +80,7 @@ def forward_autoregressive(
     V_dummy = V_state.clone()
     if checkpoint_chunk_size > 0 and torch.is_grad_enabled():
         parameters = tuple(parameter for parameter in self.parameters() if parameter.requires_grad)
-        return _OffloadedPackedARCheckpoint.apply(
+        return _offloaded_checkpoint(
             self,
             checkpoint_chunk_size,
             backward_batch_size,
@@ -91,6 +99,7 @@ def forward_autoregressive(
     return _forward_packed_chunk(self, x, K_state, V_state, K_dummy, V_dummy, q_pos, valid_start, reset_after)[0]
 
 
+@eager_loop
 def _forward_packed_chunk(
     self: WhiteMatterBlock,
     x_chunk: torch.Tensor,

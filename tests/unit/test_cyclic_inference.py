@@ -56,17 +56,12 @@ def test_cyclic_inference_matches_general_execution(monkeypatch, channels, passe
     # Keep the independent training schedule, with every pass explicitly detached.
     with torch.enable_grad(), model_autocast_context(device):
         expected, expected_kv = block(x, num_gradient_passes=0, cyclic_groups=groups, output_final_state=True)
-    if device == "cpu":
-        # Exercise identical scheduling/storage on CPU without compiling reference attention.
-        for name in ("_write_pool", "_inference_layers"):
-            monkeypatch.setattr(
-                cyclic, name, getattr(getattr(cyclic, name), "_torchdynamo_orig_callable", getattr(cyclic, name))
-            )
     # Match canonical production KV, not the reference driver's exported strides.
     shape = (*expected_kv[0].shape[:-2], length + 8, dim)
     keys = torch.full(shape, float("nan"), device=device, dtype=torch.bfloat16 if device == "cuda" else x.dtype)
     values = torch.full_like(keys, float("nan"))
-    actual, state = cyclic.inference_forward(
+    run = torch.compile(cyclic.forward_cyclic, fullgraph=True) if device == "cuda" else cyclic.forward_cyclic
+    actual, state = run(
         block,
         x,
         kv_cache=(keys, values),

@@ -1,12 +1,25 @@
-"""Feedback compilation and training CUDA graph capture."""
+"""Workload compilation and training CUDA graph capture."""
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import torch
 
 _COMPILE_OPTIONS = {"emulate_precision_casts": True}
+
+
+def _packed_ar_backend(graph, inputs):
+    from torch._dynamo.backends.registry import lookup_backend
+
+    warnings.warn(
+        "Packed autoregressive execution uses aot_eager: autograd graphs are captured, "
+        "while tensor kernels remain eager to preserve the validated gradient behavior.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return lookup_backend("aot_eager")(graph, inputs)
 
 
 class _AutoregressiveDecoder(torch.nn.Module):
@@ -55,26 +68,21 @@ def patch_inductor_skip_repro_deepcopy() -> None:
     cfx._repro_deepcopy_patched = True
 
 
-def compile_feedback(
+def configure_training_compilation(
     model: Any,
     *,
-    mode: str,
     ar_dynamic: bool = False,
 ) -> None:
-    """Compile feedback methods in place for training or likelihood evaluation.
+    """Configure the packed-AR exception before compiling the enclosing workload.
 
-    An enclosing compiled caller may inline these methods. Packed AR uses
-    AOTAutograd's eager backend for its growing token state.
+    Repeated passes use nested regions in the model implementation. Packed AR
+    checkpoints retain their separately validated AOTAutograd backend.
     """
     decoder = model.model.decoder
     block = getattr(decoder, "block", decoder)  # Baselines may own their layers directly.
     # Remove the dead per-compile FX-graph deepcopy before any torch.compile runs.
     patch_inductor_skip_repro_deepcopy()
 
-    for name, dynamic in (("jacobi_pass", False), ("cyclic_pass", False), ("_autoregressive_step", ar_dynamic)):
-        if hasattr(block, name):
-            arguments = {"options": dict(_COMPILE_OPTIONS)} if mode == "default" else {"mode": mode}
-            setattr(block, name, torch.compile(getattr(block, name), fullgraph=False, dynamic=dynamic, **arguments))
     # EOS-packed exact-AR training uses AOTAutograd's eager backend for the
     # tensor-state step.  It removes the Python module/layer traversal and
     # pre-builds backward while preserving eager ATen CUDA kernels. Token-step
@@ -84,7 +92,7 @@ def compile_feedback(
     if hasattr(block, "_packed_autoregressive_step"):
         block._packed_autoregressive_step = torch.compile(  # type: ignore[method-assign]
             block._packed_autoregressive_step,
-            backend="aot_eager",
+            backend=_packed_ar_backend,
             fullgraph=False,
             dynamic=ar_dynamic,
             # Config overrides are thread-local; checkpoint backward otherwise
@@ -101,3 +109,21 @@ def compile_training_forward(module: torch.nn.Module) -> torch.nn.Module:
         dynamic=False,
         options=dict(_COMPILE_OPTIONS),
     )
+
+
+def compile_evaluation(model: Any, *, eager_pass_loop: bool = False) -> None:
+    """Compile evaluation, optionally keeping variable pass counts in Python."""
+    patch_inductor_skip_repro_deepcopy()
+    if eager_pass_loop:
+        block = model.model.decoder.block
+        for name in ("inference_jacobi_pass", "inference_pass", "cyclic_pass"):
+            if hasattr(block, name):
+                setattr(block, name, torch.compile(getattr(block, name), dynamic=True, options=dict(_COMPILE_OPTIONS)))
+        # Skip the scheduling frames while allowing their compiled passes to run.
+        for name in ("forward", "forward_jacobi"):
+            if hasattr(block, name):
+                setattr(block, name, torch.compiler.disable(getattr(block, name), recursive=False))
+    # Likelihood scoring calls the backbone directly to bound vocabulary memory;
+    # generation calls the complete LM. Nested calls trace into their caller.
+    for entry in (model, model.model):
+        entry.compile(dynamic=True, options=dict(_COMPILE_OPTIONS))

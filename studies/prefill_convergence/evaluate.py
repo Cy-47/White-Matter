@@ -12,6 +12,8 @@ from evals.execution import execution, score_hidden
 from evals.loading import load_complete_model
 from studies.prefill_convergence.contiguous import forward_contiguous
 from studies.prefill_convergence.protocol import MODES, schedules, validate_checkpoint
+from training.compile import compile_evaluation
+from white_matter.compilation import add_compile_argument, execution_policy
 from white_matter.models import register_models
 
 
@@ -30,7 +32,7 @@ def load_windows(path):
 
 
 @torch.inference_mode()
-def measure_curves(model, ids, *, limits, batch_size):
+def measure_curves(model, ids, *, limits, batch_size, compiled=True):
     """Run each trajectory once; observe outputs without restarting its passes."""
     if (
         batch_size < 1
@@ -47,6 +49,9 @@ def measure_curves(model, ids, *, limits, batch_size):
     ar_sum = 0.0
     device = next(model.parameters()).device
     block = model.model.decoder.block
+    options = {"emulate_precision_casts": True}
+    run_jacobi = torch.compile(block.forward_jacobi, options=options) if compiled else block.forward_jacobi
+    run_cyclic = torch.compile(block, options=options) if compiled else block
     separator = config.document_separator_token_id
     config.document_separator_token_id = None
     try:
@@ -59,16 +64,21 @@ def measure_curves(model, ids, *, limits, batch_size):
                 x = model.model.embed_tokens(batch)
                 for mode, limit in limits.items():
 
+                    @torch.compiler.disable
                     def observe(passes, hidden, mode=mode, batch=batch):
                         normalized = model.model.norm(hidden)
                         totals[mode][passes - 1] += score_hidden(normalized, batch, model.lm_head.weight)
 
                     if mode == "jacobi":
-                        block.forward_jacobi(x, num_passes=limit, num_gradient_passes=0, on_pass=observe)
+                        run_jacobi(x, num_passes=limit, num_gradient_passes=0, on_pass=observe)
                     elif mode.startswith("contiguous"):
-                        forward_contiguous(block, x, num_passes=limit, chunks=MODES[mode], on_pass=observe)
+                        forward_contiguous(
+                            block, x, num_passes=limit, chunks=MODES[mode], compiled=compiled, on_pass=observe
+                        )
                     else:
-                        block(x, num_passes=limit, cyclic_groups=MODES[mode], num_gradient_passes=0, on_pass=observe)
+                        run_cyclic(
+                            x, num_passes=limit, cyclic_groups=MODES[mode], num_gradient_passes=0, on_pass=observe
+                        )
                 print(f"quality: {min(start + batch_size, len(ids))}/{len(ids)} windows", flush=True)
     finally:
         config.document_separator_token_id = separator
@@ -87,7 +97,13 @@ def main():
     parser.add_argument("--cyclic-passes", type=int, default=32)
     parser.add_argument("--contiguous-passes", type=int, default=80)
     parser.add_argument("--modes", nargs="+", choices=MODES, default=list(MODES))
+    add_compile_argument(parser)
     args = parser.parse_args()
+    with execution_policy(args.compile):
+        _run(args, parser)
+
+
+def _run(args, parser):
     if args.output.exists():
         raise FileExistsError(args.output)
     windows, meta = load_windows(args.windows)
@@ -96,6 +112,8 @@ def main():
     register_models()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = load_complete_model(args.model, dtype=torch.float32).to(device).eval()
+    if args.compile:
+        compile_evaluation(model)
     validate_checkpoint(model.config)
     identity = checkpoint_files(args.model)
     ids = torch.from_numpy(windows[args.offset : args.offset + args.count].astype(np.int64))
@@ -108,7 +126,7 @@ def main():
         for mode in args.modes
     }
     source = snapshot_source(args.output.parent / "sources")
-    result = measure_curves(model, ids, limits=limits, batch_size=args.batch_size)
+    result = measure_curves(model, ids, limits=limits, batch_size=args.batch_size, compiled=args.compile)
     if identity != checkpoint_files(args.model):
         raise RuntimeError("checkpoint changed during evaluation")
     verify_sources(source)
@@ -119,6 +137,7 @@ def main():
             schedules=schedules(limits),
             protocol="prefill_convergence",
             precision="fp32",
+            compiled=args.compile,
             model=args.model,
             checkpoint=identity,
             windows_sha256=meta["sha256"],

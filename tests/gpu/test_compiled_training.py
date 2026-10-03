@@ -8,7 +8,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from tests.numerics import assert_close, assert_gradient_maps_close
-from training.compile import compile_feedback, compile_training_forward
+from training.compile import _packed_ar_backend, compile_training_forward, configure_training_compilation
 from training.forward import TrainingForward
 from training.losses import checkpointed_linear_cross_entropy, lm_cross_entropy_from_hidden
 from training.precision import configure_precision
@@ -18,21 +18,21 @@ from white_matter.modules.precision import model_autocast_context
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")]
 
 
-@pytest.mark.parametrize("architecture", ["white_matter", "autoregressive", "lckv", "vanilla", "fusedkv"])
+@pytest.mark.parametrize("architecture", ["white_matter", "jacobi", "autoregressive", "lckv", "vanilla", "fusedkv"])
 def test_compiled_training_preserves_loss_and_all_gradients(architecture):
     configure_precision("cuda")
     torch.manual_seed(71)
     exact_ar = architecture == "autoregressive"
     extra = (
         {"num_kv_channels": 2, "cyclic_groups": 4, "num_passes": 3, "router_layer_stride": 2}
-        if architecture in {"white_matter", "autoregressive"}
+        if architecture in {"white_matter", "jacobi", "autoregressive"}
         else {"num_kv_channels": 1, "num_passes": 3, "num_pre_layers": 1, "num_post_layers": 1}
         if architecture == "lckv"
         else {"num_kv_channels": None}
     )
     config = AutoConfig.for_model(
-        "white_matter" if exact_ar else architecture,
-        **({"execution_mode": "autoregressive"} if exact_ar else {}),
+        "white_matter" if architecture in {"jacobi", "autoregressive"} else architecture,
+        **({"execution_mode": architecture} if architecture in {"jacobi", "autoregressive"} else {}),
         vocab_size=257,
         hidden_size=192,
         intermediate_size=384,
@@ -48,7 +48,7 @@ def test_compiled_training_preserves_loss_and_all_gradients(architecture):
     config._attn_implementation = "flash_attention_2"
     optimized = AutoModelForCausalLM.from_config(config).cuda().train()
     reference = copy.deepcopy(optimized)
-    compile_feedback(optimized, mode="default", ar_dynamic=exact_ar)
+    configure_training_compilation(optimized, ar_dynamic=exact_ar)
     ids = torch.randint(0, 256, (2, 32 if exact_ar else 128), device="cuda")
     ids[0, [6, 19]] = 256
     ids[1, [3, 23]] = 256
@@ -81,6 +81,10 @@ def test_compiled_training_preserves_loss_and_all_gradients(architecture):
                 if exact_ar:
                     hidden = decoder.block.forward_autoregressive(
                         inputs, document_ids=segments, checkpoint_chunk_size=0
+                    )
+                elif architecture == "jacobi":
+                    hidden = decoder.block.forward_jacobi(
+                        inputs, num_passes=3, num_gradient_passes=2, document_ids=segments
                     )
                 elif architecture == "white_matter":
                     hidden, _ = decoder.block.forward(
@@ -151,7 +155,7 @@ def test_ar_checkpoint_compilation_limit_preserves_training(monkeypatch, caplog,
     native_compile = torch.compile
 
     def limited_compile(*args, **kwargs):
-        if kwargs.get("backend") == "aot_eager":
+        if kwargs.get("backend") is _packed_ar_backend:
             kwargs.pop("recompile_limit", None)
         return native_compile(*args, **kwargs)
 
@@ -161,7 +165,7 @@ def test_ar_checkpoint_compilation_limit_preserves_training(monkeypatch, caplog,
         with monkeypatch.context() as patch:
             if reference:
                 patch.setattr(torch, "compile", limited_compile)
-            compile_feedback(model, mode="default", ar_dynamic=True)
+            configure_training_compilation(model, ar_dynamic=True)
             forward = compile_training_forward(TrainingForward(model, checkpoint_chunk_size=16, external_ce=True))
             records = []
             for ids in batches:

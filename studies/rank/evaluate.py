@@ -19,8 +19,10 @@ from studies.protocol import (
     validate_paper_cache,
 )
 from studies.rank.protocol import ARMS, RECIPE_DIR, validate_recipe
+from training.compile import compile_evaluation
 from training.precision import configure_precision
 from training.recipes import load_recipe
+from white_matter.compilation import add_compile_argument, execution_policy
 from white_matter.models import register_models
 
 
@@ -52,8 +54,13 @@ def main() -> None:
     parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True)
+    add_compile_argument(parser)
     args = parser.parse_args()
+    with execution_policy(args.compile):
+        _run(args, parser)
+
+
+def _run(args, parser):
     if args.batch_size < 1:
         parser.error("--batch-size must be positive")
     if args.output.exists():
@@ -70,15 +77,14 @@ def main() -> None:
     configure_precision(device)
     model = load_complete_model(args.model, dtype=torch.float32).to(device).eval()
     arm, passes = validate_checkpoint(model.config)
-    if args.compile and device.type == "cuda":
-        from training.compile import compile_feedback
-
-        compile_feedback(model, mode="default")
+    if args.compile:
+        compile_evaluation(model)
     loader = paper_test_loader(args.data_dir, batch_size=args.batch_size, device=device)
     loss_sum, targets = evaluate_fixed_passes(model, loader, num_passes=passes)
     if targets != PAPER_TEST_TARGETS:
         raise RuntimeError(f"expected {PAPER_TEST_TARGETS} prediction targets, got {targets}")
     result = {
+        "compiled": args.compile,
         "protocol": "figure7b_sequential_final",
         "arm": arm,
         "checkpoint": str(args.model),

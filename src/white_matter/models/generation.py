@@ -50,8 +50,6 @@ class DecodeGraph:
             raise ValueError("prefill must leave room for a decoding token")
         if model.config.document_separator_token_id is not None or cache.document_ids is not None:
             raise ValueError("decode capture requires single-document inference")
-        if model.config._attn_implementation != "flash_attention_2":
-            raise ValueError("decode capture requires flash_attention_2")
         self.model, self.cache = model, cache
         self.input_ids = torch.zeros_like(cache.position)
         self._buffers = tuple(

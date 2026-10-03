@@ -4,6 +4,12 @@ import torch
 import torch.nn.functional as F
 
 
+@torch.compile(dynamic=True, options={"emulate_precision_casts": True})
+def _score_chunk(hidden, weight, target):
+    logits = F.linear(hidden.to(weight.dtype), weight)
+    return -F.cross_entropy(logits.float(), target, reduction="none"), logits.argmax(-1) == target
+
+
 @torch.inference_mode()
 def score_tokens(hidden, weight, targets, *, chunk_size=256):
     """Return target log probabilities and greedy matches for flat token inputs."""
@@ -13,8 +19,5 @@ def score_tokens(hidden, weight, targets, *, chunk_size=256):
     greedy = torch.empty_like(targets, dtype=torch.bool)
     for start in range(0, targets.numel(), chunk_size):
         stop = start + chunk_size
-        logits = F.linear(hidden[start:stop].to(weight.dtype), weight)
-        target = targets[start:stop]
-        scores[start:stop] = -F.cross_entropy(logits.float(), target, reduction="none")
-        greedy[start:stop] = logits.argmax(-1) == target
+        scores[start:stop], greedy[start:stop] = _score_chunk(hidden[start:stop], weight, targets[start:stop])
     return scores, greedy

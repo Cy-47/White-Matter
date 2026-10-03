@@ -11,7 +11,7 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from training.compile import compile_feedback
+from training.compile import configure_training_compilation
 from training.forward import TrainingForward
 from training.losses import checkpointed_linear_cross_entropy
 from training.optim import (
@@ -99,7 +99,7 @@ def test_native_cast_cache_matches_reference_training(monkeypatch, architecture,
                 muon_ns_steps=5,
                 device="cuda",
             )
-            compile_feedback(model, mode="default", ar_dynamic=exact_ar)
+            configure_training_compilation(model, ar_dynamic=exact_ar)
             forward = torch.compile(
                 TrainingForward(model, checkpoint_chunk_size=16 if exact_ar else 0, external_ce=exact_ar),
                 fullgraph=False,

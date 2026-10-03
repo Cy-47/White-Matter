@@ -20,8 +20,10 @@ import torch
 from benchmarks._measurement import checkpoint_files
 from evals.execution import score_hidden
 from evals.loading import load_complete_model
+from training.compile import compile_evaluation
 from training.data import load_cache_metadata, split_row_indices
 from training.precision import attention_kernel_context
+from white_matter.compilation import add_compile_argument, execution_policy
 from white_matter.models import register_models
 from white_matter.modules.precision import model_autocast_context
 
@@ -55,7 +57,13 @@ def main() -> None:
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--n-eval", type=int, default=0, help="0 scores the rest of the test split")
     parser.add_argument("--sequence-length", type=int, default=2048)
+    add_compile_argument(parser)
     args = parser.parse_args()
+    with execution_policy(args.compile):
+        _run(args, parser)
+
+
+def _run(args, parser):
     if min(args.batch_size, args.ce_chunk, args.sequence_length) < 1 or args.offset < 0 or args.n_eval < 0:
         raise ValueError("batch, CE chunk, sequence length must be positive; offset and n-eval nonnegative")
     if args.output.exists():
@@ -68,6 +76,8 @@ def main() -> None:
     # Keep the FP32 master weights from the paper checkpoint. Model GEMMs run
     # under BF16 autocast, as in the original held-out evaluation.
     model = load_complete_model(str(args.model), dtype=torch.float32).to(device).eval()
+    if args.compile:
+        compile_evaluation(model)
 
     cache_meta = load_cache_metadata(args.data_dir)
     splits = cache_meta["splits"]
@@ -134,6 +144,7 @@ def main() -> None:
         del ids, rows, hidden
 
     result = {
+        "compiled": args.compile,
         "checkpoint": checkpoint_files(str(args.model)),
         "model_config": model.config.to_dict(),
         "model": str(args.model),

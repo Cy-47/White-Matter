@@ -3,6 +3,7 @@
 import argparse
 import math
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from training.optim import build_optimizers, step_optimizers
 from training.precision import configure_precision
 from training.recipes import load_recipe
 from training.step import prepare_training_forward, training_gradients
+from white_matter.compilation import add_compile_argument
 
 
 def synthetic_batches(recipe, batch_size, *, device, rank, count):
@@ -62,7 +64,7 @@ def benchmark(args):
         f"distributed_muon={recipe.optimizer.distributed_muon}",
         flush=True,
     )
-    recipe.model._attn_implementation = "flash_attention_2"
+    recipe.model._attn_implementation = args.attention_backend
     model = AutoModelForCausalLM.from_config(recipe.model).to(device=device, dtype=torch.float32).train()
     runner = prepare_training_forward(model, recipe, args.batch_size, compiled=args.compiled)
     opt = recipe.optimizer
@@ -106,6 +108,7 @@ def benchmark(args):
     setup_seconds = time.perf_counter() - setup_start
     torch.cuda.empty_cache()
     samples = []
+    compiler_guard = torch.compiler.set_stance("fail_on_recompile") if args.compiled else nullcontext()
     if args.profile:
         trace = str(Path(args.profile).with_name(Path(args.profile).stem + f".rank{rank}.json"))
         with torch.profiler.profile(
@@ -113,7 +116,7 @@ def benchmark(args):
             record_shapes=True,
             profile_memory=True,
         ) as profile:
-            with torch.compiler.set_stance("fail_on_recompile"):
+            with compiler_guard:
                 step()
             torch.cuda.synchronize(device)
         profile.export_chrome_trace(trace)
@@ -123,7 +126,7 @@ def benchmark(args):
             dist.barrier()
         torch.cuda.synchronize(device)
         torch.cuda.reset_peak_memory_stats(device)
-        with MemoryMonitor(local_rank) as monitor, torch.compiler.set_stance("fail_on_recompile"):
+        with MemoryMonitor(local_rank) as monitor, compiler_guard:
             start = time.perf_counter()
             loss, norm = step()
             torch.cuda.synchronize(device)
@@ -175,7 +178,7 @@ def main():
     parser.add_argument("--recipes", dest="models", nargs="+", help="Training recipe YAML files")
     add_run_arguments(parser)
     parser.set_defaults(batch_sizes=[1])
-    parser.add_argument("--compiled", action=argparse.BooleanOptionalAction, default=True)
+    add_compile_argument(parser, "--compiled")
     parser.add_argument("--world-size", type=int, default=1, help="Local GPU processes per fresh worker")
     args = parser.parse_args()
     if args.worker:
@@ -196,7 +199,7 @@ def main():
         args,
         kind="training",
         module="benchmarks.training",
-        workload_keys=("phase", "warmups", "repetitions", "seed", "compiled", "world_size"),
+        workload_keys=("phase", "warmups", "repetitions", "seed", "compiled", "world_size", "attention_backend"),
         metadata={
             "compiled": args.compiled,
             "prompt_distribution": "synthetic_packed_documents",

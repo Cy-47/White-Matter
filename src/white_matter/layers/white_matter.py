@@ -42,8 +42,10 @@ class FeedbackAttention(Protocol):
         query_stride: int | None = None,
         query_offset: int = 0,
         cache_seqlens: torch.Tensor | None = None,
+        static_cache: bool = False,
         committed_prefix: bool = False,
         jacobi: bool = False,
+        jacobi_backend: Literal["auto", "reference", "flash_attention_2"] = "auto",
         prefix_length: int = 0,
     ) -> torch.Tensor: ...
 
@@ -94,8 +96,10 @@ class WhiteMatterAttention(nn.Module):
         query_stride: int | None = None,
         query_offset: int = 0,
         cache_seqlens: torch.Tensor | None = None,
+        static_cache: bool = False,
         committed_prefix: bool = False,
         jacobi: bool = False,
+        jacobi_backend: Literal["auto", "reference", "flash_attention_2"] = "auto",
         prefix_length: int = 0,
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
@@ -108,12 +112,20 @@ class WhiteMatterAttention(nn.Module):
         # Persistent KV already has the attention dtype; avoid copying the prefix.
         if query_stride is None and cache_seqlens is None and not jacobi:
             key_states, value_states = key_states.to(query_states.dtype), value_states.to(query_states.dtype)
-        if self.use_dummy_token is not None and (jacobi or committed_prefix):
-            lengths = None if cache_seqlens is None else cache_seqlens - int(self.use_dummy_token)
+        strict_backend: Literal["auto", "reference"] = (
+            "reference"
+            if self.attention_implementation == "eager" or getattr(self, "_force_strict_reference", False)
+            else "auto"
+        )
+        if (self.use_dummy_token is not None and (jacobi or committed_prefix)) or (
+            self.strict_causal and (committed_prefix or cache_seqlens is not None or decode_key_mask is not None)
+        ):
+            use_dummy_token = bool(self.use_dummy_token)
+            lengths = None if cache_seqlens is None else cache_seqlens - int(use_dummy_token)
             start = (
                 prefix_length
                 if jacobi
-                else (key_states.shape[-2] - int(self.use_dummy_token) if lengths is None else lengths)
+                else (key_states.shape[-2] - int(use_dummy_token) if lengths is None else lengths)
             )
             keep = None if decode_key_mask is None else decode_key_mask[:, 0, 0]
             if keep is not None and keep.dtype != torch.bool:
@@ -124,14 +136,13 @@ class WhiteMatterAttention(nn.Module):
                 value_states,
                 query_start=start,
                 kv_lengths=lengths,
-                use_dummy_token=self.use_dummy_token,
+                use_dummy_token=use_dummy_token,
                 metadata=metadata if isinstance(metadata, StrictCausalMetadata) else None,
                 key_mask=keep,
                 softmax_scale=self.scaling,
-                backend=("reference" if getattr(self, "_force_jacobi_reference", False) else "auto")
-                if jacobi
-                else ("flash_attention_2" if self.attention_implementation == "flash_attention_2" else "reference"),
+                backend=jacobi_backend if jacobi and strict_backend == "auto" else strict_backend,
                 num_splits=self.num_splits,
+                static_cache=static_cache,
             ).to(projection_dtype)
         elif self.strict_causal and not (committed_prefix or cache_seqlens is not None or decode_key_mask is not None):
             schedule = metadata if isinstance(metadata, StrictCausalMetadata) else None
@@ -143,7 +154,7 @@ class WhiteMatterAttention(nn.Module):
                 value_states,
                 metadata=schedule,
                 softmax_scale=self.scaling,
-                backend="auto" if self.attention_implementation == "flash_attention_2" else "reference",
+                backend=strict_backend,
             )
         elif not self.strict_causal and (
             query_stride is not None or (metadata is not None and decode_key_mask is None)
@@ -183,5 +194,6 @@ class WhiteMatterAttention(nn.Module):
                 is_causal=not self.strict_causal and decode_key_mask is None,
                 cache_seqlens=None if self.strict_causal and decode_key_mask is not None else cache_seqlens,
                 num_splits=self.num_splits,
+                static_cache=static_cache,
             )
         return self.o_proj(output.reshape(*input_shape, -1).contiguous())

@@ -15,6 +15,7 @@ from training.recipes import load_recipe
 def runtime_run(tmp_path):
     root = Path(__file__).resolve().parents[2]
     command = commands(tmp_path)[0]
+    assert command[command.index("--attention-backend") + 1] == "flash_attention_2"
     recipes = command[command.index("--recipes") + 1 : command.index("--batch-sizes")]
     directory = tmp_path / "run"
     (directory / "cases").mkdir(parents=True)
@@ -79,6 +80,7 @@ def test_collect_accepts_complete_paper_runtime(runtime_run, monkeypatch, tmp_pa
         ("config", "document_separator_token_id", 151643),
         ("workload", "parameter_dtype", "float32"),
         ("workload", "parameter_dtype", None),
+        ("workload", "attention_backend", "sdpa"),
     ],
 )
 def test_collect_rejects_incompatible_runtime(runtime_run, section, key, value):

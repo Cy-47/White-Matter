@@ -11,7 +11,7 @@ from white_matter.modules.precision import fp32_inference
 
 @contextmanager
 def execution(model, *, mode=None, passes=None, groups=None, precision="bf16"):
-    """Restore all settings on exit; FP32 uses eager reference attention throughout."""
+    """Restore all settings on exit; FP32 uses reference attention throughout."""
     if precision not in {"fp32", "bf16"}:
         raise ValueError("precision must be fp32 or bf16")
     if mode not in {None, "cyclic", "jacobi", "autoregressive"}:
@@ -37,7 +37,7 @@ def execution(model, *, mode=None, passes=None, groups=None, precision="bf16"):
             for module in model.modules():
                 if isinstance(module, WhiteMatterAttention):
                     set_value(module, "attention_implementation", "sdpa")
-                    set_value(module, "_force_jacobi_reference", True)
+                    set_value(module, "_force_strict_reference", True)
                     set_value(module, "_force_cyclic_reference", True)
         with (
             fp32_inference() if precision == "fp32" else nullcontext(),

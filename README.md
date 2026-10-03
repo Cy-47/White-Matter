@@ -8,11 +8,20 @@ This repository provides the WhiteMatter model, its cyclic attention operator, t
 
 Python 3.11 or newer is required. From this repository:
 
-```bash
-pip install -e '.[models,training,data]'
-```
+| Setup                                                                | Install                          |
+| -------------------------------------------------------------------- | -------------------------------- |
+| Models and PyTorch operators                                         | `pip install -e .`               |
+| TileLang kernels for cyclic attention                                | `pip install -e '.[tilelang]'`   |
+| Research tools, including TileLang, Gigatoken, and development tools | `pip install -e '.[research]'`   |
+| Development tools                                                    | `pip install -e '.[dev]'`        |
+| Optional standalone FlashAttention                                   | `pip install -e '.[flash-attn]'` |
 
-For CUDA kernels and benchmarks, install the `gpu` and `benchmarks` extras as needed. The tested versions of PyTorch, Transformers, FlashAttention, and TileLang are specified in [pyproject.toml](pyproject.toml). The base package requires only PyTorch; model classes require the `models` extra.
+See the [installation guide](docs/installation.md) for CUDA setup and fallback behavior.
+
+Training, evaluation, examples, and runtime benchmarks compile tensor execution
+by default. Evaluation and examples accept `--no-compile`; model benchmarks use
+`--no-compiled`. These diagnostic options print an eager-execution warning.
+See the [execution policy](docs/installation.md#compilation-policy) for details.
 
 ## Use a model
 
@@ -102,7 +111,7 @@ ruff check src training evals examples benchmarks tests scripts studies
 ruff format --check src training evals examples benchmarks tests scripts studies
 ```
 
-GPU tests exercise the optional kernels and compiled execution. Run them on compatible hardware with the `gpu` extra installed.
+GPU tests exercise the optional kernels and compiled execution. Run them on compatible hardware with `.[research,flash-attn]` installed.
 
 ## License
 

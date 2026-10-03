@@ -4,7 +4,7 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from training.compile import compile_feedback
+from training.compile import configure_training_compilation
 from training.forward import TrainingForward
 from training.losses import cce_linear_cross_entropy, checkpointed_linear_cross_entropy
 from training.optim import build_optimizers, set_learning_rate, step_optimizers
@@ -97,7 +97,7 @@ def test_compiled_optimizer_preserves_training():
     optimizers = [make_optimizers(model, compiled=bool(i)) for i, model in enumerate(models)]
     runners = []
     for model in models:
-        compile_feedback(model, mode="default")
+        configure_training_compilation(model)
         runners.append(torch.compile(TrainingForward(model), fullgraph=False, dynamic=False))
     for step in range(3):
         ids = torch.randint(0, 256, (2, 128), device="cuda")
@@ -141,7 +141,7 @@ def test_optimizations_preserve_training(optimization, residual_dtype):
         ids[1, [1, length // 2 + step]] = 256
     runners = []
     for model in (reference, candidate):
-        compile_feedback(model, mode="default", ar_dynamic=graph or checkpointed)
+        configure_training_compilation(model, ar_dynamic=graph or checkpointed)
         runner = TrainingForward(
             model,
             checkpoint_chunk_size=16 if checkpointed else 0,

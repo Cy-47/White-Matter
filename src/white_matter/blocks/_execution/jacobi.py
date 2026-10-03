@@ -106,9 +106,13 @@ def forward_jacobi(
         )
     )
     states = x.unsqueeze(1).expand(-1, self.kv_pool.num_layers, -1, -1).contiguous()
+    # Jacobi training stays in the outer graph to preserve BF16 backward rounding.
+    execute_detached_pass = self.jacobi_pass
+    if num_gradient_passes == 0:
+        execute_detached_pass = getattr(self, "inference_jacobi_pass", self.jacobi_pass)
     with torch.no_grad(), model_autocast_context(x.device):
         for index in range(detached_passes):
-            states, hidden = self.jacobi_pass(x, states, q_pos_emb, k_pos_emb, past_key_values, metadata)
+            states, hidden = execute_detached_pass(x, states, q_pos_emb, k_pos_emb, past_key_values, metadata)
             if on_pass is not None:
                 on_pass(index + 1, hidden)
     # Detached passes produce fresh state tensors; differentiated passes still read live x.

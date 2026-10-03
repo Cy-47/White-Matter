@@ -51,6 +51,7 @@ def attention_forward(module, query, key, value, attention_mask, **kwargs):
             scaling=module.scaling,
             implementation=implementation,
             cache_seqlens=lengths,
+            static_cache=kwargs.pop("static_cache", False),
             num_splits=module.num_splits,
         ), None
     interface = ALL_ATTENTION_FUNCTIONS.get_interface(implementation, eager_attention_forward)
@@ -121,6 +122,7 @@ class Qwen3Attention(nn.Module):
             if cached:
                 key_states, value_states = cached_key, cached_value
                 kwargs["cache_seqlens"] = past_key_values.lengths(self.layer_idx, hidden_states.shape[0])
+                kwargs["static_cache"] = past_key_values.capacity is not None
             if self.config._attn_implementation == "flash_attention_2":
                 # Match FA's cast before its logging branch, which breaks compilation.
                 query_states, key_states = query_states.to(value_states.dtype), key_states.to(value_states.dtype)

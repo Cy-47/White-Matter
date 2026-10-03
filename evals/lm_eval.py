@@ -19,8 +19,9 @@ from benchmarks._measurement import checkpoint_files
 from evals.loading import load_complete_model
 from evals.paper import PAPER_TASKS
 from evals.scoring import score_tokens
-from training.compile import compile_feedback
+from training.compile import compile_evaluation
 from training.precision import attention_kernel_context
+from white_matter.compilation import add_compile_argument, execution_policy
 from white_matter.models import register_models
 from white_matter.modules.precision import model_autocast_context
 
@@ -285,7 +286,7 @@ def main() -> None:
     parser.add_argument("--include-path", type=Path, help="Directory of additional lm-eval task YAMLs.")
     parser.add_argument("--limit", type=int, help="Examples per task, for smoke tests only.")
     parser.add_argument("--max-length", type=int, default=MAX_EVAL_CONTEXT_TOKENS)
-    parser.add_argument("--no-compile", action="store_true", help="Skip optional feedback compilation on CUDA.")
+    add_compile_argument(parser)
     parser.add_argument("--prefill-mode", choices=["cyclic", "jacobi", "autoregressive"])
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-fewshot", type=int, default=0)
@@ -298,6 +299,11 @@ def main() -> None:
         help="Evaluate a half-open document-index range for one task (for sharding).",
     )
     args = parser.parse_args()
+    with execution_policy(args.compile):
+        _run(args, parser)
+
+
+def _run(args, parser):
     if args.sample_range is not None:
         start, stop = args.sample_range
         if len(args.tasks) != 1 or args.limit is not None or not 0 <= start < stop:
@@ -315,8 +321,8 @@ def main() -> None:
         args.prefill_mode = model.config.execution_mode
     if args.prefill_mode is not None:
         model.config.prefill_mode = args.prefill_mode
-    if device.type == "cuda" and not args.no_compile:
-        compile_feedback(model, mode="default")
+    if args.compile:
+        compile_evaluation(model)
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -346,6 +352,7 @@ def main() -> None:
         json.dumps(
             {
                 "model": args.model,
+                "compiled": args.compile,
                 "tasks": args.tasks,
                 "limit": args.limit,
                 "checkpoint": checkpoint_files(args.model) if Path(args.model).is_dir() else None,

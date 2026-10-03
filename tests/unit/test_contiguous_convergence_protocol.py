@@ -8,6 +8,13 @@ from studies.prefill_convergence.contiguous import forward_contiguous
 from tests.unit.test_experiment_protocols import tiny_model
 
 
+@pytest.fixture(autouse=True)
+def reset_compiler():
+    torch.compiler.reset()
+    yield
+    torch.compiler.reset()
+
+
 @torch.inference_mode()
 def reference(block, x, passes, chunks):
     # Keep layer-input state, and rebuild the entire pool before every chunk.
@@ -217,3 +224,26 @@ def test_timing_join_preserves_unreached_modes(unreached):
         timing["schedules"][next(iter(reached))]["update"] = "invalid"
         with pytest.raises(ValueError, match="schedule mismatch"):
             join_timings(quality, timing)
+
+
+@torch.inference_mode()
+def test_chunk_preserves_explicit_kernel_selection(monkeypatch):
+    from studies.prefill_convergence.contiguous import _chunk
+    from white_matter.layers import white_matter
+
+    block = tiny_model().model.decoder.block
+    x = torch.randn(2, 7, 16)
+    query_rope, key_rope = block._prepare_rope(x)
+    keys, values = block.kv_pool.project_sequence(
+        x.unsqueeze(2).expand(-1, -1, block.kv_pool.num_layers, -1), key_rope, dummy_token=block.dummy_token
+    )
+    selected = []
+    attention = white_matter.strict_causal_attention
+
+    def record_backend(*args, backend, **kwargs):
+        selected.append(backend)
+        return attention(*args, backend="reference", **kwargs)
+
+    monkeypatch.setattr(white_matter, "strict_causal_attention", record_backend)
+    _chunk(block, x, keys, values, query_rope, key_rope, 0, True, "flash_attention_2")
+    assert selected == ["flash_attention_2"] * len(block.layers)

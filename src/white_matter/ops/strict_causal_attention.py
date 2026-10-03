@@ -3,14 +3,34 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from importlib.util import find_spec
+from typing import Literal, cast
 
 import torch
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from white_matter._typing import compiler_disable
+from white_matter._typing import compiler_assume_constant_result, compiler_disable
 
-from .flash_attention import flash_attention_decode
+from .flash_attention import (
+    TorchFlashDense,
+    TorchFlashVarlen,
+    can_use_torch_flash,
+    flash_attention_decode,
+    torch_flash_decode,
+)
+
+
+def _query_starts(query_start: int | torch.Tensor, batch: int, device: torch.device) -> torch.Tensor:
+    if isinstance(query_start, torch.Tensor):
+        return query_start.to(device=device).expand(batch)
+    # torch.as_tensor(SymInt) specializes each growing cache length under Dynamo.
+    return torch.full((batch,), query_start, device=device, dtype=torch.long)
+
+
+@compiler_assume_constant_result
+def _standalone_flash_available() -> bool:
+    return find_spec("flash_attn") is not None
 
 
 @dataclass(frozen=True)
@@ -24,6 +44,15 @@ class StrictCausalMetadata:
     max_queries: int
     max_keys: int
     key_extent: int
+    segments: tuple[tuple[int, int, int, int], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.segments and self.cu_queries.numel() > 1:
+            queries = self.cu_queries.tolist()
+            keys = self.cu_keys.tolist()
+            object.__setattr__(
+                self, "segments", tuple(zip(queries[:-1], queries[1:], keys[:-1], keys[1:], strict=True))
+            )
 
     def with_key_extent(self, key_extent: int) -> StrictCausalMetadata:
         """Address the same key slots in storage with a different row width."""
@@ -39,6 +68,7 @@ class StrictCausalMetadata:
             self.max_queries,
             self.max_keys,
             key_extent,
+            self.segments,
         )
 
 
@@ -111,7 +141,13 @@ def prepare_strict_causal_metadata(
     key_slots = torch.where(local == 0, -1, key_slots) if use_dummy_token else key_slots
     key_indices = rows[groups] * (extent + offset) + key_slots + offset
     return StrictCausalMetadata(
-        query_indices, key_indices, cu_queries.int(), cu_keys.int(), query_length, extent + offset, extent + offset
+        query_indices,
+        key_indices,
+        cu_queries.int(),
+        cu_keys.int(),
+        int(cu_queries.diff().max()),
+        int(lengths.max()),
+        extent + offset,
     )
 
 
@@ -126,8 +162,9 @@ def strict_causal_attention(
     metadata: StrictCausalMetadata | None = None,
     key_mask: torch.Tensor | None = None,
     softmax_scale: float | None = None,
-    backend: Literal["auto", "reference", "flash_attention_2"] = "auto",
+    backend: Literal["auto", "reference", "torch_flash", "flash_attention_2"] = "auto",
     num_splits: int = 0,
+    static_cache: bool = False,
 ) -> torch.Tensor:
     """Attend only to earlier real tokens, plus an optional leading dummy.
 
@@ -136,9 +173,15 @@ def strict_causal_attention(
     K/V may contain current tokens or unused cache capacity; neither is visible
     outside the strict-past bound. Inputs are never mutated. Empty rows return
     zero. metadata is prepared from document IDs once outside layer/pass loops.
-    key_mask, when supplied, is boolean (B,N) and forces the reference backend.
+    auto uses efficient SDPA for differentiable single-query masked/ragged reads.
+    Other CUDA reads prefer standalone FlashAttention, otherwise requiring native
+    PyTorch FlashAttention. CPU auto uses the reference. torch_flash requires native FA;
+    flash_attention_2 explicitly selects the optional external package. num_splits
+    applies only to external cached decoding. key_mask is boolean (B,N) and
+    supports accelerated single-query reads. static_cache permits lifting decode offsets only
+    when the caller guarantees fixed batch size and KV storage capacity.
     """
-    if backend not in {"auto", "reference", "flash_attention_2"}:
+    if backend not in {"auto", "reference", "torch_flash", "flash_attention_2"}:
         raise ValueError(f"unsupported strict causal backend: {backend!r}")
     if type(use_dummy_token) is not bool:
         raise ValueError("use_dummy_token must be boolean")
@@ -171,30 +214,64 @@ def strict_causal_attention(
     if not length or not key.shape[-2]:
         zero = (query[..., :0, :].sum() + key[..., :0, :].sum() + value[..., :0, :].sum()).to(query.dtype)
         return query.new_zeros(batch, length, heads, dim) + zero
-    use_flash = backend != "reference" and query.is_cuda and key_mask is None
-    if backend == "auto" and use_flash:
-        from importlib.util import find_spec
-
-        use_flash = dim <= 256 and find_spec("flash_attn") is not None
-    if (
-        use_flash
-        and metadata is None
+    masked_training = (
+        backend == "auto"
+        and query.is_cuda
         and length == 1
-        and not (torch.is_grad_enabled() and any(t.requires_grad for t in (query, key, value)))
-    ):
-        # Keep decode graph-visible; only the pybind call is a registered custom op.
-        dtype = query.dtype if query.dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
-        q, k, v = (t.transpose(1, 2).to(dtype) for t in (query, key, value))
-        lengths = torch.as_tensor(query_start, device=query.device).expand(batch)
-        if kv_lengths is not None:
-            lengths = torch.minimum(lengths, kv_lengths)
-        lengths = lengths.clamp(0, capacity).to(torch.int32) + offset
-        output = flash_attention_decode(q, k, v, lengths, scale, False, num_splits)
-        return output.masked_fill((lengths == 0)[:, None, None, None], 0).to(query.dtype)
+        and metadata is None
+        and (key_mask is not None or kv_lengths is not None or isinstance(query_start, torch.Tensor))
+        and torch.is_grad_enabled()
+        and any(t.requires_grad for t in (query, key, value))
+    )
+    if masked_training:
+        # Masked SDPA keeps ragged lengths on-device during forward/backward capture.
+        backend = "reference"
+    if backend == "auto":
+        backend = (
+            ("flash_attention_2" if _standalone_flash_available() else "torch_flash") if query.is_cuda else "reference"
+        )
+    use_flash = backend != "reference"
     if use_flash:
-        return _flash_attention(query, key, value, query_start, kv_lengths, use_dummy_token, metadata, scale)
-    if backend == "flash_attention_2" and not query.is_cuda:
-        raise ValueError("FlashAttention requires CUDA")
+        if not query.is_cuda:
+            raise ValueError("FlashAttention requires CUDA")
+        if key_mask is not None:
+            if length != 1:
+                raise ValueError("FlashAttention key_mask requires a single query; use document metadata for prefill")
+            # Pack visible committed slots before FA reads the cache. Each row
+            # can have a different document boundary or padding pattern.
+            starts = _query_starts(query_start, batch, query.device)
+            bounds = starts if kv_lengths is None else torch.minimum(starts, kv_lengths)
+            slots = torch.arange(key.shape[-2], device=query.device)
+            keep = key_mask & (slots[None, :] < bounds[:, None] + offset)
+            lengths = keep.sum(-1, dtype=torch.int32)
+            order = (~keep).to(torch.uint8).argsort(dim=-1, stable=True)
+            indices = order[:, None, :, None].expand_as(key)
+            return strict_causal_attention(
+                query,
+                key.gather(2, indices),
+                value.gather(2, indices),
+                query_start=lengths,
+                kv_lengths=lengths,
+                softmax_scale=scale,
+                backend=backend,
+                num_splits=num_splits,
+                static_cache=static_cache,
+            )
+    if use_flash:
+        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            return _accelerated_attention(
+                query,
+                key,
+                value,
+                query_start,
+                kv_lengths,
+                use_dummy_token,
+                metadata,
+                scale,
+                backend,
+                num_splits,
+                static_cache,
+            )
     if metadata is not None:
         # Varlen schedule defines independent groups and bottom-right causal bounds.
         q = query.transpose(1, 2).flatten(0, 1)[metadata.query_indices]
@@ -202,9 +279,7 @@ def strict_causal_attention(
         v = value.transpose(1, 2).flatten(0, 1)[metadata.key_indices]
         zero = (query[..., :0, :].sum() + key[..., :0, :].sum() + value[..., :0, :].sum()).to(query.dtype)
         output = query.new_zeros(batch * length, heads, dim) + zero
-        for group in range(metadata.cu_queries.numel() - 1):
-            qs, qe = metadata.cu_queries[group : group + 2].tolist()
-            ks, ke = metadata.cu_keys[group : group + 2].tolist()
+        for qs, qe, ks, ke in metadata.segments:
             keep = torch.arange(ke - ks, device=query.device)[None, :] <= (
                 ke - ks - (qe - qs) + torch.arange(qe - qs, device=query.device)[:, None]
             )
@@ -217,7 +292,7 @@ def strict_causal_attention(
             )
             output = output.index_copy(0, metadata.query_indices[qs:qe], result[0])
         return output.view(batch, length, heads, dim)
-    starts = torch.as_tensor(query_start, device=query.device).expand(batch)
+    starts = _query_starts(query_start, batch, query.device)
     qpos = starts[:, None] + torch.arange(length, device=query.device)
     slots = torch.arange(key.shape[-2], device=query.device) - offset
     keep = slots[None, None, :] < qpos[:, :, None]
@@ -229,7 +304,55 @@ def strict_causal_attention(
         keep = keep & key_mask[:, None, :]
     # Clear unused storage: even a masked NaN in K/V can contaminate GEMMs.
     visible = keep.any(1)[:, None, :, None]
-    return _sdpa(query, key.masked_fill(~visible, 0), value.masked_fill(~visible, 0), keep[:, None], scale)
+    key, value = key.masked_fill(~visible, 0), value.masked_fill(~visible, 0)
+    if masked_training:
+        # Fold grouped query heads into the query axis to avoid copying K/V.
+        grouped_query = query.reshape(batch, key.shape[1], heads // key.shape[1], dim)
+        # Efficient SDPA requires an aligned additive-mask stride.
+        bias = torch.zeros_like(keep, dtype=query.dtype).masked_fill(~keep, float("-inf"))
+        padded = F.pad(bias, (0, (-keep.shape[-1]) % 8), value=float("-inf"))
+        keep = padded[..., : keep.shape[-1]]
+        with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+            output = _sdpa(grouped_query, key, value, keep[:, None], scale)
+        return output.transpose(1, 2).reshape(batch, 1, heads, dim)
+    return _sdpa(query, key, value, keep[:, None], scale)
+
+
+def _accelerated_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    query_start: int | torch.Tensor,
+    kv_lengths: torch.Tensor | None,
+    use_dummy_token: bool,
+    metadata: StrictCausalMetadata | None,
+    scale: float,
+    backend: str,
+    num_splits: int,
+    static_cache: bool,
+) -> torch.Tensor:
+    if (
+        metadata is None
+        and query.shape[-2] == 1
+        and not (torch.is_grad_enabled() and any(t.requires_grad for t in (query, key, value)))
+    ):
+        # Keep lengths on-device; no document packing is needed for a single query.
+        dtype = query.dtype if query.dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
+        q, k, v = (t.transpose(1, 2).to(dtype) for t in (query, key, value))
+        lengths = _query_starts(query_start, query.shape[0], query.device)
+        if kv_lengths is not None:
+            lengths = torch.minimum(lengths, kv_lengths)
+        lengths = lengths.clamp(0, key.shape[-2] - int(use_dummy_token)).to(torch.int32) + int(use_dummy_token)
+        if backend == "flash_attention_2":
+            output = flash_attention_decode(q, k, v, lengths, scale, False, num_splits)
+        elif can_use_torch_flash(q, k, v):
+            output = torch_flash_decode(
+                q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), lengths, scale, static_cache=static_cache
+            )
+        else:
+            raise RuntimeError("PyTorch FlashAttention does not support these inputs or this GPU/build")
+        return output.to(query.dtype)
+    return _flash_attention(query, key, value, query_start, kv_lengths, use_dummy_token, metadata, scale, backend)
 
 
 def _sdpa(
@@ -246,7 +369,6 @@ def _sdpa(
     ).transpose(1, 2)
 
 
-@compiler_disable
 def _flash_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -256,28 +378,50 @@ def _flash_attention(
     use_dummy_token: bool,
     metadata: StrictCausalMetadata | None,
     scale: float,
+    backend: str,
 ) -> torch.Tensor:
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
+    external = backend == "flash_attention_2"
+    if external:
+        from flash_attn import flash_attn_func, flash_attn_varlen_func
 
     batch, heads, length, dim = query.shape
     dtype = query.dtype if query.dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
     q, k, v = (t.transpose(1, 2).to(dtype) for t in (query, key, value))
     offset = int(use_dummy_token)
+    if not external and not can_use_torch_flash(q, k, v):
+        raise RuntimeError("PyTorch FlashAttention does not support these inputs or this GPU/build")
     if metadata is not None:
         output = q.new_zeros(batch * length, heads, dim)
         if metadata.query_indices.numel():
-            selected = flash_attn_varlen_func(
-                q.flatten(0, 1)[metadata.query_indices],
-                k.flatten(0, 1)[metadata.key_indices],
-                v.flatten(0, 1)[metadata.key_indices],
-                metadata.cu_queries,
-                metadata.cu_keys,
-                metadata.max_queries,
-                metadata.max_keys,
-                softmax_scale=scale,
-                causal=True,
-            )
-            output = output.index_copy(0, metadata.query_indices, selected)
+            packed_q = q.flatten(0, 1).index_select(0, metadata.query_indices)
+            packed_k = k.flatten(0, 1).index_select(0, metadata.key_indices)
+            packed_v = v.flatten(0, 1).index_select(0, metadata.key_indices)
+            if external:
+                selected = flash_attn_varlen_func(
+                    packed_q,
+                    packed_k,
+                    packed_v,
+                    metadata.cu_queries,
+                    metadata.cu_keys,
+                    metadata.max_queries,
+                    metadata.max_keys,
+                    softmax_scale=scale,
+                    causal=True,
+                )
+            else:
+                if dim % 8:
+                    packed_q, packed_k, packed_v = (F.pad(t, (0, 8 - dim % 8)) for t in (packed_q, packed_k, packed_v))
+                selected = TorchFlashVarlen.apply(
+                    packed_q,
+                    packed_k,
+                    packed_v,
+                    metadata.cu_queries,
+                    metadata.cu_keys,
+                    metadata.max_queries,
+                    metadata.max_keys,
+                    scale,
+                )
+            output = output.index_copy(0, metadata.query_indices, cast(torch.Tensor, selected)[..., :dim])
         else:
             output = output + (q[:, :0].sum() + k[:, :0].sum() + v[:, :0].sum())
         return output.view(batch, length, heads, dim).to(query.dtype)
@@ -287,10 +431,13 @@ def _flash_attention(
             skip = int(query_start == 0 and not use_dummy_token)
             if length == skip:
                 return (q * 0 + (k[:, :0].sum() + v[:, :0].sum())).to(query.dtype)
-            result = flash_attn_func(q[:, skip:], k[:, :end], v[:, :end], softmax_scale=scale, causal=True)
+            if external:
+                result = flash_attn_func(q[:, skip:], k[:, :end], v[:, :end], softmax_scale=scale, causal=True)
+            else:
+                result = _torch_flash_attention(q[:, skip:], k[:, :end], v[:, :end], scale)
             return F.pad(result, (0, 0, 0, 0, skip, 0)).to(query.dtype)
     # Ragged prefixes use the same document packing as a single document per row.
-    starts = torch.as_tensor(query_start, device=query.device).expand(batch)
+    starts = _query_starts(query_start, batch, query.device)
     extent = max(key.shape[-2] - offset, int(starts.max()) + length)
     docs = torch.zeros(batch, extent, dtype=torch.long, device=query.device)
     schedule = prepare_strict_causal_metadata(
@@ -304,4 +451,20 @@ def _flash_attention(
     )
     # Packing indices use the document extent, which may include unstored queries.
     schedule = schedule.with_key_extent(key.shape[-2])
-    return _flash_attention(query, key, value, query_start, kv_lengths, use_dummy_token, schedule, scale)
+    return _flash_attention(query, key, value, query_start, kv_lengths, use_dummy_token, schedule, scale, backend)
+
+
+def _torch_flash_attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, scale: float) -> torch.Tensor:
+    """Native FlashAttention's causal flag uses lower-right alignment."""
+    dim = query.shape[-1]
+    q, k, v = (t.transpose(1, 2) for t in (query, key, value))
+    if dim % 8:
+        q, k, v = (F.pad(t, (0, 8 - dim % 8)) for t in (q, k, v))
+    if torch.is_grad_enabled() and any(t.requires_grad for t in (q, k, v)):
+        return cast(torch.Tensor, TorchFlashDense.apply(q, k, v, scale, True))[..., :dim]
+    # This is the operator used by CausalBias, without constructing a Tensor
+    # subclass inside the compiled region. Eligibility was checked by the caller.
+    result = torch.ops.aten._scaled_dot_product_flash_attention(
+        q, k, v, 0.0, is_causal=True, return_debug_mask=False, scale=scale
+    )[0]
+    return result[..., :dim].transpose(1, 2)

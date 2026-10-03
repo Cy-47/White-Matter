@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn.functional as F
 
-from white_matter._typing import dynamo_disable, dynamo_disable_nonrecursive
+from white_matter._typing import nested_compile_region
 from white_matter.modules.checkpointing import checkpoint_pointwise
 from white_matter.modules.precision import model_autocast_context
 from white_matter.ops import CyclicAttentionMetadata
@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from white_matter.blocks.white_matter import WhiteMatterBlock
 
 
-@dynamo_disable
 def _prepare_cyclic_groups(
     self: WhiteMatterBlock,
     T: int,
@@ -29,39 +28,23 @@ def _prepare_cyclic_groups(
     q_pos_emb: tuple[torch.Tensor, torch.Tensor],
     k_pos_emb: tuple[torch.Tensor, torch.Tensor],
     device: torch.device,
-    *,
-    cache_rope: bool = True,
 ) -> tuple[
     list[torch.Tensor],
     list[tuple[torch.Tensor, torch.Tensor]],
     list[tuple[torch.Tensor, torch.Tensor]],
     torch.Tensor,
 ]:
-    """Cache the static schedule; reuse RoPE slices only for fixed positions."""
-    schedule_key = (T, cyclic_groups, str(device))
-    schedule = self._cyclic_schedule_cache.get(schedule_key)
-    if schedule is None:
-        # Groups are strided: with two groups, visit [0,2,4,...], then [1,3,5,...].
-        query_groups = [torch.arange(c, T, cyclic_groups, device=device) for c in range(cyclic_groups)]
-        restore_order = torch.argsort(torch.cat(query_groups))
-        schedule = (query_groups, restore_order)
-        self._cyclic_schedule_cache[schedule_key] = schedule
-    query_groups, restore_order = schedule
-
-    rope_key = (*schedule_key, q_pos_emb[0].dtype)
-    # Document-reset positions depend on the batch, so their RoPE slices cannot be reused.
-    cached_rope = self._cyclic_rope_cache.get(rope_key) if cache_rope else None
-    if cached_rope is None:
-        q_cos, q_sin = q_pos_emb
-        k_cos, k_sin = k_pos_emb
-        query_group_rope = [(q_cos[:, p], q_sin[:, p]) for p in query_groups]
-        offset = int(self.use_dummy_token)
-        key_slots = [torch.cat((p.new_zeros(offset), p + offset)) for p in query_groups]
-        key_group_rope = [(k_cos.index_select(1, p), k_sin.index_select(1, p)) for p in key_slots]
-        cached_rope = (query_group_rope, key_group_rope)
-        if cache_rope:
-            self._cyclic_rope_cache[rope_key] = cached_rope
-    return query_groups, *cached_rope, restore_order
+    """Build the group schedule and slices from the current positions."""
+    # Schedule tensors and RoPE slices stay inside the enclosing compiled graph.
+    query_groups = [torch.arange(c, T, cyclic_groups, device=device) for c in range(cyclic_groups)]
+    restore_order = torch.argsort(torch.cat(query_groups))
+    q_cos, q_sin = q_pos_emb
+    k_cos, k_sin = k_pos_emb
+    query_group_rope = [(q_cos[:, p], q_sin[:, p]) for p in query_groups]
+    offset = int(self.use_dummy_token)
+    key_slots = [torch.cat((p.new_zeros(offset), p + offset)) for p in query_groups]
+    key_group_rope = [(k_cos.index_select(1, p), k_sin.index_select(1, p)) for p in key_slots]
+    return query_groups, query_group_rope, key_group_rope, restore_order
 
 
 def _compact_channel_major(
@@ -131,23 +114,6 @@ def _training_group(
     return hidden if hidden is not None else x.new_empty(0), keys, values
 
 
-def _checkpoint_training_group(*args: object) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return checkpoint_pointwise(_training_group, *args)
-
-
-_compiled_training_group = torch.compile(
-    _checkpoint_training_group,
-    fullgraph=False,
-    dynamic=False,
-    options={"emulate_precision_casts": True},
-)
-
-
-@dynamo_disable_nonrecursive
-def _run_training_group(*args: object) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return _compiled_training_group(*args)
-
-
 def forward_cyclic(
     self: WhiteMatterBlock,
     x: torch.Tensor,
@@ -194,19 +160,6 @@ def forward_cyclic(
         and not torch.is_grad_enabled()
         and not num_gradient_passes
     )
-    if bounded and torch.compiler.is_compiling():
-        return inference_forward(
-            self,
-            x,
-            num_passes=n_iter,
-            num_gradient_passes=num_gradient_passes,
-            cyclic_groups=cyclic_groups,
-            attention_mask=attention_mask,
-            document_ids=document_ids,
-            output_final_state=output_final_state,
-            kv_cache=kv_cache,
-            on_pass=on_pass,
-        )
     n_passes_no_grad = n_iter - num_gradient_passes
     length = x.shape[1]
     if length <= cyclic_groups:
@@ -241,17 +194,13 @@ def forward_cyclic(
     # The explicit batched input preserves backward numerics across the compiled pass boundary.
     dummy_token = None if self.dummy_token is None else self.dummy_token.view(1, 1, -1).expand(x.shape[0], 1, -1)
     L = self.kv_pool.num_layers
-    pass_inputs = _prepare_cyclic_groups(
-        self, T, cyclic_groups, q_pos_emb, k_pos_emb, x.device, cache_rope=(document_ids is None)
-    )
+    pass_inputs = _prepare_cyclic_groups(self, T, cyclic_groups, q_pos_emb, k_pos_emb, x.device)
     metadata = None
     if document_ids is not None:
         from .metadata import prepare_feedback_metadata
 
         metadata = prepare_feedback_metadata(document_ids, pass_inputs[0], T, use_dummy_token=self.use_dummy_token)
 
-    # Cached prefill compiles its bounded operations, not the whole training pass.
-    execute_pass = run_pass.__get__(self) if kv_cache is not None else self.cyclic_pass
     layer_hidden_states = None
     for detached, count in ((True, n_passes_no_grad), (False, num_gradient_passes)):
         if not count:
@@ -284,6 +233,9 @@ def forward_cyclic(
                 if 1 < self.num_kv_channels < self.num_layers:
                     K, V = _compact_channel_major(K, V, self.use_dummy_token)
                 del source
+            # Nested regions require functional outputs. Inference publishes
+            # into caller-owned KV storage and is traced into the outer graph.
+            execute_pass = training_pass.__get__(self) if torch.is_grad_enabled() else self.cyclic_pass
             for p in range(count):
                 last = p == count - 1
                 h, K, V, layer_hidden_states = execute_pass(
@@ -341,9 +293,8 @@ def run_pass(
 ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Shared group order with functional training or bounded cache publication.
 
-    Training keeps its whole-pass compilation and optional dummy-row projection.
-    Cached inference compiles only layer sweeps and bounded pool writes;
-    pool_chunk_size and return_output configure that bounded branch.
+    The enclosing workload captures the recurrence and reuses this pass region.
+    pool_chunk_size bounds inference projection temporaries.
     """
     _, T, _ = x_in.shape
     offset = int(self.use_dummy_token)
@@ -374,7 +325,8 @@ def run_pass(
         terminal_group = (T - 1) % len(query_groups)
         for offset, positions in enumerate(query_groups):
             terminal = self.use_dummy_token and offset == terminal_group
-            hidden, keys, values = _run_training_group(
+            hidden, keys, values = checkpoint_pointwise(
+                _training_group,
                 self,
                 x_in,
                 K_initial,
@@ -406,7 +358,6 @@ def run_pass(
     outputs_per_chunk: list[torch.Tensor] = []
     output = torch.empty_like(x_in) if pool_chunk_size and return_output else None
     layer_inputs_per_chunk: list[torch.Tensor] = []
-    execute_layers = _inference_layers if pool_chunk_size else _group_layers
     for c, chunk_positions in enumerate(query_groups):
         if compact_fixed:
             channel_keys, channel_values = K.unbind(0), V.unbind(0)
@@ -415,7 +366,7 @@ def run_pass(
         else:
             channel_keys = tuple(tensor[..., :T, :].contiguous() for tensor in K.unbind(1))
             channel_values = tuple(tensor[..., :T, :].contiguous() for tensor in V.unbind(1))
-        h, chunk_layer_inputs = execute_layers(
+        h, chunk_layer_inputs = _group_layers(
             self,
             x_in,
             channel_keys,
@@ -491,11 +442,9 @@ def run_pass(
     return out, K, V, hs
 
 
-# Static prefill keeps host scheduling outside the enclosing model graph.
-inference_forward = dynamo_disable(forward_cyclic)
+training_pass = nested_compile_region(run_pass)
 
 
-@torch.compile(fullgraph=True, dynamic=True, options={"emulate_precision_casts": True, "max_autotune": True})
 def _write_pool(
     block: WhiteMatterBlock,
     states: list[torch.Tensor],
@@ -538,8 +487,3 @@ def _group_layers(
     )
     # Top-inclusive pools need the final layer even on non-output passes.
     return hidden if return_output else None, states
-
-
-_inference_layers = torch.compile(
-    _group_layers, fullgraph=True, dynamic=True, options={"emulate_precision_casts": True}
-)

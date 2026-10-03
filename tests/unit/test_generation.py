@@ -31,7 +31,7 @@ def device(request):
     return request.param
 
 
-def make_model(device, *, k=2, surrounding=0, prefill="autoregressive", residual_dtype="fp32"):
+def make_model(device, *, k=2, surrounding=0, prefill="autoregressive", residual_dtype="fp32", backend=None):
     torch.manual_seed(73)
     config = AutoConfig.for_model(
         "white_matter",
@@ -57,7 +57,7 @@ def make_model(device, *, k=2, surrounding=0, prefill="autoregressive", residual
         prefill_mode=prefill,
         residual_dtype=residual_dtype,
     )
-    config._attn_implementation = "flash_attention_2" if device == "cuda" else "sdpa"
+    config._attn_implementation = backend or ("flash_attention_2" if device == "cuda" else "sdpa")
     return AutoModelForCausalLM.from_config(config).to(device).eval()
 
 
@@ -150,7 +150,7 @@ def test_cyclic_export_matches_full_layout_and_continuation(device, k):
     with model_autocast_context(device):
         x = model.model.embed_tokens(ids)
         q_rope, k_rope = block._prepare_rope(x, docs)
-        schedule = _prepare_cyclic_groups(block, x.shape[1], 4, q_rope, k_rope, x.device, cache_rope=False)
+        schedule = _prepare_cyclic_groups(block, x.shape[1], 4, q_rope, k_rope, x.device)
         metadata = prepare_feedback_metadata(docs, schedule[0], x.shape[1])
         K, V = block.kv_pool.project_sequence(
             x.unsqueeze(2).expand(-1, -1, block.kv_pool.num_layers, -1), k_rope, dummy_token=block.dummy_token
@@ -392,13 +392,13 @@ def test_flash_decoding_matches_masked_sdpa_without_expanding_kv(monkeypatch, pr
     assert len(calls) == 3 * model.config.num_hidden_layers
 
 
-def inference_model(device, family, surrounding=0, prefill="cyclic", k=2):
-    model = make_model(device, surrounding=surrounding, prefill=prefill, k=k)
+def inference_model(device, family, surrounding=0, prefill="cyclic", k=2, backend=None):
+    model = make_model(device, surrounding=surrounding, prefill=prefill, k=k, backend=backend)
     if family == "vanilla":
         config = model.config.to_dict()
         config.pop("model_type")
         config = AutoConfig.for_model("vanilla", **config)
-        config._attn_implementation = "flash_attention_2" if device == "cuda" else "sdpa"
+        config._attn_implementation = backend or ("flash_attention_2" if device == "cuda" else "sdpa")
         model = AutoModelForCausalLM.from_config(config).to(device).eval()
     model.config.document_separator_token_id = None
     return model
@@ -497,10 +497,16 @@ def test_explicit_cached_positions_continue(device, family):
 @pytest.mark.parametrize("family", ["vanilla", "white_matter"])
 @pytest.mark.parametrize("surrounding", [0, 1])
 @torch.no_grad()
-def test_decode_graph_changes_tokens_lengths_and_cache_contents(family, surrounding):
+@pytest.mark.parametrize("backend", ["sdpa", "flash_attention_2"])
+def test_decode_graph_changes_tokens_lengths_and_cache_contents(family, surrounding, backend, monkeypatch):
     from white_matter.models.generation import DecodeGraph
 
-    model = inference_model("cuda", family, surrounding)
+    if backend == "sdpa":
+        import importlib
+
+        attention = importlib.import_module("white_matter.ops.strict_causal_attention")
+        monkeypatch.setattr(attention, "_standalone_flash_available", lambda: False)
+    model = inference_model("cuda", family, surrounding, backend=backend)
     cache = model.allocate_inference_cache(32)
     reference = model.allocate_inference_cache(32)
     ids = torch.tensor([[2, 3, 4, 5, 6, 7, 8, 9], [10, 11, 12, 13, 14, 15, 16, 17]], device="cuda")

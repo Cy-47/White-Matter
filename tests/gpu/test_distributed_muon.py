@@ -10,7 +10,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from test_training_optimizations import assert_training_close, make_model, make_optimizers, training_step
 
-from training.compile import compile_feedback
+from training.compile import configure_training_compilation
 from training.distributed import all_reduce_grads
 from training.forward import TrainingForward
 from training.optim import clip_grad_norm_if_needed_, step_optimizers
@@ -32,7 +32,7 @@ def _worker(rank, rendezvous):
         candidate = copy.deepcopy(reference)
         runners = []
         for model in (reference, candidate):
-            compile_feedback(model, mode="default")
+            configure_training_compilation(model)
             runners.append(torch.compile(TrainingForward(model, external_ce=True), fullgraph=False, dynamic=False))
         reference_opt = make_optimizers(reference, compiled=False)
         candidate_opt = make_optimizers(candidate, distributed=True)

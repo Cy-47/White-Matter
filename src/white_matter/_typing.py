@@ -9,6 +9,9 @@ import torch
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 # These aliases only provide the signatures missing from PyTorch's stubs.
+compiler_assume_constant_result = cast(Callable[[_F], _F], torch.compiler.assume_constant_result)
+nested_compile_region = cast(Callable[[_F], _F], torch.compiler.nested_compile_region)
 compiler_disable = cast(Callable[[_F], _F], torch.compiler.disable)
-dynamo_disable = cast(Callable[[_F], _F], torch._dynamo.disable)
-dynamo_disable_nonrecursive = cast(Callable[[_F], _F], partial(torch._dynamo.disable, recursive=False))
+
+# Skip host scheduling while the enclosing compiler still captures child tensor calls.
+eager_loop = cast(Callable[[_F], _F], partial(torch.compiler.disable, recursive=False))

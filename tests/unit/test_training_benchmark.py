@@ -54,6 +54,7 @@ def test_training_uses_shared_capacity_search(tmp_path, monkeypatch, distributed
     def worker(command, **kwargs):
         path = Path(command[-1])
         case = json.loads(path.read_text())
+        assert case["workload"]["attention_backend"] == "sdpa"
         assert case["workload"]["compiled"] is False
         batch = case["workload"]["batch_size"]
         if distributed and batch > 3:

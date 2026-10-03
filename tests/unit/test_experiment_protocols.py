@@ -98,7 +98,7 @@ def test_execution_restores_settings_after_failure():
         raise RuntimeError("test")
     assert model.config.to_dict() == original
     for module in model.modules():
-        assert not hasattr(module, "_force_jacobi_reference")
+        assert not hasattr(module, "_force_strict_reference")
 
 
 def quality_shard(offset, count, loss):

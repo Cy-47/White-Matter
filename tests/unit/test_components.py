@@ -60,7 +60,9 @@ class BlockOptional(MetaPathFinder):
         if fullname.split('.')[0] in {'transformers', 'tilelang', 'flash_attn'}:
             raise AssertionError('unexpected optional import: ' + fullname)
 sys.meta_path.insert(0, BlockOptional())
-runpy.run_path(sys.argv[1], run_name='__main__')
+example = sys.argv[1]
+sys.argv = [example, '--no-compile']
+runpy.run_path(example, run_name='__main__')
 """,
             str(example),
         ],

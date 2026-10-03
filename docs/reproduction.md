@@ -14,8 +14,14 @@ The wheel installs only the reusable `white_matter` package.
 | `slurm/` | Portable cluster launch examples |
 | `tests/` | CPU checks, CUDA correctness gates, and typing contracts |
 
-Run checkout commands from the repository root after installing the extras in
-[the main guide](../README.md). Activate that environment before submitting
+Run checkout commands from the repository root after installing the data,
+training, and GPU dependencies:
+
+```bash
+pip install -e '.[research,flash-attn]'
+```
+
+See the [installation guide](installation.md) for CUDA setup. Activate that environment before submitting
 Slurm jobs. Pass your account, partition, and GPU type at submission time.
 
 Training automatically resumes an output directory containing `ckpt_full.pt`.
@@ -39,14 +45,14 @@ lm-eval tests additionally require the harness revision in the main guide.
 Build the FineWeb-Edu cache used by the paper recipes:
 
 ```bash
+pip install -e '.[research]'
 python scripts/prepare_fineweb_edu.py --reproduce-paper-order
 ```
 
-For optional Gigatoken acceleration, install the extra and select its Hugging
-Face compatibility backend explicitly:
+The `research` extra includes Gigatoken. To require its Hugging Face compatibility
+backend explicitly:
 
 ```bash
-pip install -e '.[training,data,gigatoken]'
 python scripts/prepare_fineweb_edu.py --reproduce-paper-order --tokenizer-backend gigatoken
 ```
 
@@ -55,6 +61,9 @@ Hugging Face otherwise. Use `--tokenizer-backend hf` to force Hugging Face. Both
 identical filtering, EOS packing, and partitioning; the selected backend and
 installed tokenizer package versions are recorded in `cache_meta.json`.
 An explicitly requested but unavailable Gigatoken backend raises an error.
+Automatic selection warns when Gigatoken is missing and the builder falls back
+to slower Hugging Face tokenization. Explicit `--tokenizer-backend hf` selection
+does not warn.
 A broken installation or failing tokenizer also raises rather than silently
 switching tokenizers. Omit `--reproduce-paper-order` for continuous source-order
 packing; in paper mode the eight logical partitions are independent of `--workers`.
@@ -205,7 +214,7 @@ arithmetic. Vanilla and FusedKV counts are checked against independent formulas.
 
 ### Figures
 
-Install `pip install -e '.[analysis]'` to render PDF/PNG figures from collected
+Install `pip install -e '.[research]'` to render PDF/PNG figures from collected
 results, without the manuscript checkout:
 
 ```bash

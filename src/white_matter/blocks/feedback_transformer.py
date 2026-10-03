@@ -7,6 +7,7 @@ from typing import cast
 import torch
 from torch import nn
 
+from white_matter._typing import eager_loop
 from white_matter.modules.rotary import RotaryEmbedding, rotate_half
 
 from .decoder_layer import FeedbackDecoderLayer
@@ -59,6 +60,7 @@ class FeedbackTransformerBlock(nn.Module):
         *,
         key_mask: torch.Tensor | None = None,
         cache_lengths: torch.Tensor | None = None,
+        static_cache: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         rope = self.rotary_emb(token, position)
         states = [token]
@@ -77,12 +79,14 @@ class FeedbackTransformerBlock(nn.Module):
                     rope,
                     decode_key_mask=key_mask,
                     cache_seqlens=cache_lengths,
+                    static_cache=static_cache,
                     committed_prefix=True,
                 )
             states.append(hidden)
         key, value = self.memory(states, rope)
         return hidden, key, value
 
+    @eager_loop
     def forward_reference(
         self,
         x: torch.Tensor,

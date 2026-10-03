@@ -10,7 +10,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from studies.shared_mixture.model import SharedMixtureConfig, register_model
 from tests.numerics import assert_close, assert_gradient_maps_close
 from tests.unit.test_shared_mixture_study import _manual_projection
-from training.compile import compile_feedback, compile_training_forward
+from training.compile import compile_training_forward, configure_training_compilation
 from training.forward import TrainingForward
 from training.precision import attention_kernel_context, configure_precision
 from white_matter.modules.precision import model_autocast_context
@@ -71,7 +71,7 @@ def test_full_rank_shared_mixture_production_training_matches_independent_refere
         layer.self_attn._force_cyclic_reference = True
     pool = reference.model.decoder.block.kv_pool
     pool._project = MethodType(_manual_projection, pool)
-    compile_feedback(optimized, mode="default")
+    configure_training_compilation(optimized)
 
     ids = torch.randint(0, 256, (2, 128), device="cuda")
     ids[0, [7, 23, 71]] = 256

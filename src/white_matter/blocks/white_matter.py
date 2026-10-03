@@ -7,7 +7,7 @@ from collections.abc import Sequence
 import torch
 from torch import nn
 
-from white_matter._typing import compiler_disable
+from white_matter._typing import eager_loop, nested_compile_region
 from white_matter.modules.documents import document_position_ids, feedback_document_mask
 from white_matter.modules.kv_pool import KVPool
 from white_matter.modules.rotary import PositionEmbedding
@@ -47,11 +47,6 @@ class WhiteMatterBlock(nn.Module):
         self.num_kv_channels = kv_pool.num_kv_channels
         self.num_passes = num_passes
         self.checkpoint_jacobi_passes = checkpoint_jacobi_passes
-        self._cyclic_schedule_cache: dict[tuple[int, int, str], tuple[list[torch.Tensor], torch.Tensor]] = {}
-        self._cyclic_rope_cache: dict[
-            tuple[int, int, str, torch.dtype],
-            tuple[list[tuple[torch.Tensor, torch.Tensor]], list[tuple[torch.Tensor, torch.Tensor]]],
-        ] = {}
         if type(use_dummy_token) is not bool:
             raise ValueError("use_dummy_token must be boolean")
         self.use_dummy_token = use_dummy_token
@@ -117,6 +112,8 @@ class WhiteMatterBlock(nn.Module):
         )
         return torch.stack(states, dim=1), hidden
 
+    inference_jacobi_pass = nested_compile_region(jacobi_pass)
+
     def _autoregressive_step(
         self,
         x: torch.Tensor,
@@ -136,7 +133,7 @@ class WhiteMatterBlock(nn.Module):
             torch.cat((state[1], values.transpose(0, 1)), dim=3),
         )
 
-    forward_autoregressive = compiler_disable(autoregressive.forward_autoregressive)
+    forward_autoregressive = autoregressive.forward_autoregressive
 
     def _packed_autoregressive_step(
         self,
@@ -178,6 +175,7 @@ class WhiteMatterBlock(nn.Module):
         attention_mask: torch.Tensor | None = None,
         *,
         cache_seqlens: torch.Tensor | None = None,
+        static_cache: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Read the committed KV channels, run the layers, and project the new token."""
         x, layer_inputs = run_feedback_layers(
@@ -189,6 +187,7 @@ class WhiteMatterBlock(nn.Module):
             include_top_output=self.include_top_output,
             decode_key_mask=attention_mask,
             cache_seqlens=cache_seqlens,
+            static_cache=static_cache,
             committed_prefix=True,
         )
         keys, values = self.kv_pool.project_token(layer_inputs, position_embeddings)
@@ -205,6 +204,7 @@ class WhiteMatterBlock(nn.Module):
         positions = torch.zeros(1, 1, device=dummy.device, dtype=torch.long)
         return self.kv_pool.project_token([dummy] * self.kv_pool.num_layers, self.rotary_emb(dummy, positions))
 
+    @eager_loop
     def forward_recurrent(
         self,
         x: torch.Tensor,

@@ -11,7 +11,7 @@ _FP32_INFERENCE = False
 
 @contextmanager
 def fp32_inference() -> Iterator[None]:
-    """Disable nested model autocast for an eager FP32 reference evaluation.
+    """Disable nested model autocast for an FP32 reference evaluation.
 
     The caller must also select reference attention and FP32 model parameters.
     This process-local scope is intended for isolated evaluation workers.

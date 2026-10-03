@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from white_matter._typing import eager_loop
 from white_matter.blocks.feedback_transformer import FeedbackMemory, FeedbackTransformerBlock
 from white_matter.layers.backends import pack_kv_cache
 from white_matter.models._qwen3 import make_feedback_layers
@@ -67,7 +68,7 @@ class FeedbackTransformerDecoder(DecoderPreTrainedModel):
         x = cast_residual(inputs_embeds, residual_dtype=self.config.residual_dtype)
         return self._forward_cached(x, past_key_values, position_ids, document_ids, last_token_only)
 
-    @torch.compiler.disable
+    @eager_loop
     def _forward_cached(self, x, cache, position_ids, document_ids, last_token_only):
         """Write one K/V slot after each complete layer sweep."""
         storage = cache.layers[0]
@@ -99,6 +100,7 @@ class FeedbackTransformerDecoder(DecoderPreTrainedModel):
                 position_ids[:, t : t + 1],
                 key_mask=mask,
                 cache_lengths=lengths,
+                static_cache=cache.capacity is not None,
             )
             cache.update(key, value, 0)
             if outputs is not None:
@@ -121,14 +123,3 @@ class FeedbackTransformerModel(DecoderModel, FeedbackTransformerPreTrainedModel)
 class FeedbackTransformerForCausalLM(DecoderForCausalLM, FeedbackTransformerPreTrainedModel):
     config_class = FeedbackTransformerConfig
     model_class = FeedbackTransformerModel
-
-    def compile(self, *args, **kwargs):
-        # The cached sweep itself stays in Python so prefill traces one token
-        # step, not a graph with a copy of every layer for every prompt token.
-        block = self.model.decoder.block
-        if not getattr(block, "_token_step_compiled", False):
-            token_options = dict(kwargs)
-            token_options["fullgraph"] = True
-            block.token_step = torch.compile(block.token_step, *args, **token_options)
-            block._token_step_compiled = True
-        return super().compile(*args, **kwargs)

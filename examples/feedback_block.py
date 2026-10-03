@@ -5,9 +5,12 @@ Replace the supplied attention/MLP modules to experiment with layer computation;
 new state representations or schedules also require an appropriate block update.
 """
 
+import argparse
+
 import torch
 
 from white_matter.blocks import FeedbackDecoderLayer, WhiteMatterBlock
+from white_matter.compilation import add_compile_argument, execution_policy
 from white_matter.layers import WhiteMatterAttention
 from white_matter.modules import GatedMLP, KVPool, RotaryEmbedding
 
@@ -24,8 +27,20 @@ def make_block(hidden_size=32, num_layers=4, num_kv_channels=2, *, use_dummy_tok
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    add_compile_argument(parser)
+    args = parser.parse_args()
+    with execution_policy(args.compile):
+        run(args)
+
+
+def run(args):
     torch.manual_seed(7)
     block = make_block()
+    if args.compile:
+        options = {"emulate_precision_casts": True}
+        block.compile(options=options)
+        block.forward_recurrent = torch.compile(block.forward_recurrent, options=options)
     optimizer = torch.optim.AdamW(block.parameters(), lr=1e-3)
     # In a host model these tensors can come from embeddings or an encoder.
     conditioning = torch.randn(2, 16, 32, requires_grad=True)

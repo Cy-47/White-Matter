@@ -38,12 +38,14 @@ from training.optim import (
 )
 from training.recipes import TrainingRecipe, per_rank_batch_size
 from training.step import prepare_training_forward, training_gradients
+from white_matter.compilation import execution_policy
 
 
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+@execution_policy()
 def train(recipe: TrainingRecipe, args: argparse.Namespace) -> None:
 
     attention_implementation = "flash_attention_2"

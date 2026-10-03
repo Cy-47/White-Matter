@@ -25,11 +25,6 @@ def _projection_input(normed: torch.Tensor, gain: torch.Tensor) -> torch.Tensor:
     return mixed.permute(2, 0, 1, 3).flatten(1, 2)
 
 
-# Compile only inference pointwise work, leaving RMS reductions and GEMMs intact.
-_premix_inference = torch.compile(_premix, fullgraph=True, dynamic=True)
-_projection_input_inference = torch.compile(_projection_input, fullgraph=True, dynamic=True)
-
-
 class KVMixer(Protocol):
     """Token-local layer mixing; token chunks must be independently projectable."""
 
@@ -121,7 +116,7 @@ class KVPool(nn.Module):
         if fused:
             # Cast these small weights before fusion: Inductor otherwise removes
             # their BF16 round-trip when multiplying FP32 normalized activations.
-            stacked_K, stacked_V = _premix_inference(
+            stacked_K, stacked_V = _premix(
                 normed,
                 k_weight.view(*shape).to(stacked.dtype),
                 v_weight.view(*shape).to(stacked.dtype),
@@ -141,8 +136,8 @@ class KVPool(nn.Module):
         h_V = F.rms_norm(h_V, (self.hidden_size,), None, self.mix_norm_eps)
         batch, sequence_length = h_K.shape[:2]
         if fused:
-            h_K = _projection_input_inference(h_K, self.post_mix["k_gain"][None, None])
-            h_V = _projection_input_inference(h_V, self.post_mix["v_gain"][None, None])
+            h_K = _projection_input(h_K, self.post_mix["k_gain"][None, None])
+            h_V = _projection_input(h_V, self.post_mix["v_gain"][None, None])
         else:
             h_K = h_K * self.post_mix["k_gain"][None, None].to(h_K.dtype)
             h_V = h_V * self.post_mix["v_gain"][None, None].to(h_V.dtype)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from white_matter._typing import eager_loop
 from white_matter.blocks import WhiteMatterBlock
 from white_matter.blocks._execution import resolve_passes
 from white_matter.layers.backends import pack_kv_cache
@@ -230,6 +231,7 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
                     feedback.cumulative_length.fill_(x.shape[1] + int(self.config.use_dummy_token))
         return run_feedforward_layers(self.post_layers, x, **ordinary_args)
 
+    @eager_loop
     def _forward_cached(self, x, cache, position_ids, document_ids):
         """AR prefill and decoding share one loop over committed KV storage."""
         seen, index = cache.get_seq_length(), self.config.num_pre_layers
@@ -262,6 +264,7 @@ class WhiteMatterDecoder(DecoderPreTrainedModel):
                 self.block.rotary_emb(x, position_ids[:, t : t + 1] + int(self.config.use_dummy_token)),
                 mask,
                 cache_seqlens=lengths,
+                static_cache=cache.capacity is not None,
             )
             cache.update(key.transpose(0, 1).flatten(1, 2), value.transpose(0, 1).flatten(1, 2), index)
             outputs.append(output)

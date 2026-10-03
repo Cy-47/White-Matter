@@ -16,7 +16,7 @@ def test_missing_gigatoken_fails_explicitly(monkeypatch):
         "transformers",
         SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=lambda _: SimpleNamespace(eos_token_id=99))),
     )
-    with pytest.raises(ImportError, match="training,data,gigatoken"):
+    with pytest.raises(ImportError, match="pip install.*gigatoken"):
         builder.load_tokenizer("gigatoken")
 
 
@@ -65,7 +65,11 @@ def test_real_backends_preserve_tokens_and_packed_rows(monkeypatch):
 @pytest.mark.parametrize("installed", [False, True])
 def test_auto_selects_available_backend(monkeypatch, installed):
     monkeypatch.setitem(sys.modules, "gigatoken", SimpleNamespace() if installed else None)
-    assert builder.resolve_tokenizer_backend("auto") == ("gigatoken" if installed else "hf")
+    if installed:
+        assert builder.resolve_tokenizer_backend("auto") == "gigatoken"
+    else:
+        with pytest.warns(RuntimeWarning, match="falling back.*Hugging Face"):
+            assert builder.resolve_tokenizer_backend("auto") == "hf"
     assert builder.resolve_tokenizer_backend("hf") == "hf"
     assert builder.resolve_tokenizer_backend("gigatoken") == "gigatoken"
 

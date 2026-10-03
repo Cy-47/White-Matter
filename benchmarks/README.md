@@ -1,9 +1,16 @@
 # Benchmarks
 
-Run from the checkout after installing `pip install -e '.[benchmarks]'`. GPU workloads
-require compatible FlashAttention and TileLang installations. CCE recipes additionally
+Run GPU benchmarks from the checkout after installing `pip install -e '.[research]'`. GPU workloads
+require a compatible CUDA environment and TileLang. CCE recipes additionally
 require the [documented Cut Cross-Entropy revision](../docs/reproduction.md).
 These utilities are checkout tools, not part of the pip API.
+
+Benchmarks default to PyTorch SDPA for normal attention. Use
+`--attention-backend flash_attention_2` with `.[research,flash-attn]` to select
+standalone normal attention. Cyclic attention uses TileLang. Convergence timing
+records the resolved strict-causal backend. See the
+[installation guide](../docs/installation.md#backend-selection) for backend selection
+and setup.
 
 ## Full models
 
@@ -12,7 +19,8 @@ It uses the paper's learned, static softmax mixture of the embedding and all
 layer outputs, one shared K/V cache, and exact sequential prefill/decode over
 the full causal prefix. It is a Qwen3-shaped architecture control; its random
 weights measure runtime, not the quality of Fan et al.'s original checkpoint.
-For the paper's runtime workload, use a 2,048-token prompt, 128 timed
+For the paper's runtime workload, select `--attention-backend flash_attention_2`
+and `--cuda-graph` for generation, then use a 2,048-token prompt, 128 timed
 decode steps (`--tokens 129`), the full resident prefill batch
 (`--prefill-batch-size 0`), and a 40 GiB budget with 0.5 GiB headroom.
 
@@ -29,12 +37,11 @@ python -m benchmarks.generation --recipes recipes/paper/white_matter_1p3b.yaml r
   --prompt-lengths 2048 --batch-sizes 24 --phase decode --tokens 129 --memory-budget-gib 40
 ```
 
-Generation is compiled and uses FlashAttention decoding, with CUDA graph replay enabled
-by default. `--tokens` includes the first token selected during prefill: 129 means 128
+Generation is compiled and uses CUDA graph replay by default with either SDPA
+or external FlashAttention. Use `--no-cuda-graph` to disable replay. `--tokens` includes the first token selected during prefill: 129 means 128
 timed decode steps. Decode prefix preparation is excluded. Each cache row owns storage.
-The Feedback Transformer's cached loop stays in Python so a 2,048-token prefill
-does not trace into one enormous graph. With `--compiled`, the reusable one-token
-block is compiled as a full graph; decode also uses CUDA graph replay.
+Autoregressive prefill keeps its token loop in Python and compiles reusable
+tensor steps. Prompt length therefore does not unroll the token loop into the graph.
 Use `--no-compiled` to benchmark eager model execution when whole-model compilation
 is impractical; the run record retains this setting.
 `--prefill-batch-size 0` processes the complete resident batch; the default is one.

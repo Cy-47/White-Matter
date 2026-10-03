@@ -40,7 +40,7 @@ sbatch slurm/evaluate_lm_eval.sbatch \
 ```
 
 Prefill/decode throughput and memory-capacity search also use one GPU. Install
-`.[benchmarks]`, activate that environment, and pass the benchmark CLI options:
+`.[research]`, activate that environment, and pass the benchmark CLI options:
 
 ```bash
 sbatch slurm/benchmark_generation.sbatch --models /path/to/wm /path/to/vanilla \
@@ -52,7 +52,6 @@ See [the measurement protocol](../docs/inference.md). Use an otherwise idle GPU
 and identical precision and execution options for both model families.
 
 `sbatch slurm/validate.sbatch` runs every GPU-marked test on two GPUs and writes
-`outputs/validation-JOB_ID/gpu.xml`. Install the training, GPU, and development
-extras, plus the pinned [evaluation harness](../README.md#reproduce-the-experiments)
+`outputs/validation-JOB_ID/gpu.xml`. Install `.[research,flash-attn]`, plus the pinned [evaluation harness](../README.md#reproduce-the-experiments)
 and [Cut Cross-Entropy](../docs/reproduction.md) dependencies first. The validation
 job rejects skipped tests.

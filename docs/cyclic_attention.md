@@ -2,7 +2,7 @@
 
 `white_matter.ops.cyclic_attention` is a standalone differentiable operator.
 It does not require a model, training loop, or WhiteMatter KV cache. Install the
-base package for the PyTorch reference, or the `gpu` extra for TileLang.
+base package for the PyTorch reference, or the `tilelang` extra for TileLang.
 
 ```python
 from white_matter.ops import cyclic_attention

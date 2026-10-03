@@ -19,10 +19,11 @@ from benchmarks._measurement import (
     write_json,
 )
 from benchmarks.report import summarize_run
+from white_matter.compilation import execution_policy
 from white_matter.ops import cyclic_attention, prepare_cyclic_attention_metadata
 
 
-@torch._dynamo.config.patch(fail_on_recompile_limit_hit=True)
+@execution_policy()
 def benchmark(args) -> dict:
     device = torch.device(args.device)
     cuda = device.type == "cuda"

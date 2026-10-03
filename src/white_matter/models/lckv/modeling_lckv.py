@@ -11,6 +11,7 @@ import math
 import torch
 import torch.nn as nn
 
+from white_matter._typing import eager_loop
 from white_matter.blocks.lckv import LCKVBlock
 from white_matter.models import _qwen3 as qwen3
 from white_matter.modules import KVPool, RotaryEmbedding
@@ -140,6 +141,7 @@ class LCKVDecoder(DecoderPreTrainedModel):
             x = self._forward_cached(x, past_key_values, position_ids, document_ids)
         return run_feedforward_layers(self.post_layers, x, **ordinary_args)
 
+    @eager_loop
     def _forward_cached(self, x, cache, position_ids, document_ids):
         """Run exact autoregressive LCKV and commit one shared KV per token."""
         owner = self.config.num_pre_layers
@@ -147,37 +149,47 @@ class LCKVDecoder(DecoderPreTrainedModel):
         outputs = []
         for t in range(x.shape[1]):
             token = x[:, t : t + 1]
-            position = self.block.rotary_emb(token, position_ids[:, t : t + 1])
-            hidden, states = token, []
-            for layer in self.block.layers:
-                states.append(hidden)
-                if cache.get_seq_length() + t:
-                    lengths = cache.lengths(owner, x.shape[0])
-                    mask = None
-                    if document_ids is not None:
-                        previous = cache.document_ids[:, : cache.get_seq_length() + t]
-                        keep = previous == document_ids[:, t : t + 1]
-                        slots = torch.arange(storage.keys.shape[-2], device=x.device)
-                        keep = torch.nn.functional.pad(keep, (0, storage.keys.shape[-2] - keep.shape[-1]))
-                        keep = keep & (slots[None] < lengths[:, None])
-                        mask = hidden.new_zeros(keep[:, None, None].shape).masked_fill(
-                            ~keep[:, None, None], float("-inf")
-                        )
-                    hidden = layer(
-                        hidden,
-                        storage.keys,
-                        storage.values,
-                        position,
-                        decode_key_mask=mask,
-                        cache_seqlens=lengths,
-                    )
-                else:
-                    # The first token has no earlier KV to read.
-                    hidden = hidden + layer.mlp(layer.post_attention_layernorm(hidden))
-            key, value = self.block.kv_pool.project_token(states, position)
+            lengths = cache.lengths(owner, x.shape[0]) if cache.get_seq_length() + t else None
+            mask = None
+            if document_ids is not None and lengths is not None:
+                previous = cache.document_ids[:, : cache.get_seq_length() + t]
+                keep = previous == document_ids[:, t : t + 1]
+                slots = torch.arange(storage.keys.shape[-2], device=x.device)
+                keep = torch.nn.functional.pad(keep, (0, storage.keys.shape[-2] - keep.shape[-1]))
+                keep = keep & (slots[None] < lengths[:, None])
+                mask = x.new_zeros(keep[:, None, None].shape).masked_fill(~keep[:, None, None], float("-inf"))
+            hidden, key, value = self._token_step(
+                token,
+                storage.keys if lengths is not None else None,
+                storage.values if lengths is not None else None,
+                position_ids[:, t : t + 1],
+                mask,
+                lengths,
+                cache.capacity is not None,
+            )
             cache.update(key[0], value[0], owner)
             outputs.append(hidden)
         return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=1)
+
+    def _token_step(self, token, keys, values, position_ids, mask, lengths, static_cache):
+        position = self.block.rotary_emb(token, position_ids)
+        hidden, states = token, []
+        for layer in self.block.layers:
+            states.append(hidden)
+            if keys is None:
+                hidden = hidden + layer.mlp(layer.post_attention_layernorm(hidden))
+            else:
+                hidden = layer(
+                    hidden,
+                    keys,
+                    values,
+                    position,
+                    decode_key_mask=mask,
+                    cache_seqlens=lengths,
+                    static_cache=static_cache,
+                )
+        key, value = self.block.kv_pool.project_token(states, position)
+        return hidden, key, value
 
 
 class LCKVPreTrainedModel(DecoderPreTrainedModel):

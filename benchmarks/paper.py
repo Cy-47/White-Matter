@@ -36,6 +36,8 @@ def commands(output):
         "--parameter-dtype",
         PARAMETER_DTYPE,
         "--compiled",
+        "--attention-backend",
+        "flash_attention_2",
         "--cuda-graph",
         "--output",
         str(output),

@@ -13,7 +13,9 @@ from torch.utils.data import DataLoader
 from benchmarks._measurement import checkpoint_files
 from evals.execution import evaluate as evaluate_tokens
 from evals.loading import load_complete_model
+from training.compile import compile_evaluation
 from training.data import TokenCacheDataset, load_cache_metadata
+from white_matter.compilation import add_compile_argument, execution_policy
 from white_matter.models import register_models
 from white_matter.modules.precision import model_autocast_context
 
@@ -31,11 +33,19 @@ def main() -> None:
     parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--output", type=Path, required=True)
+    add_compile_argument(parser)
     args = parser.parse_args()
+    with execution_policy(args.compile):
+        _run(args, parser)
+
+
+def _run(args, parser):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # Preserve the paper checkpoint's master weights; GEMMs use BF16 autocast.
     model = load_complete_model(args.model, dtype=torch.float32).to(device)
+    if args.compile:
+        compile_evaluation(model)
     splits = load_cache_metadata(args.data_dir)["splits"]
     dataset = TokenCacheDataset(
         args.data_dir,
@@ -54,6 +64,7 @@ def main() -> None:
     )
     loss_sum, token_count = evaluate(model, loader)
     result = {
+        "compiled": args.compile,
         "model": args.model,
         "checkpoint": checkpoint_files(args.model) if Path(args.model).is_dir() else None,
         "model_config": model.config.to_dict(),

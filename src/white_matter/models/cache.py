@@ -42,7 +42,15 @@ class DecoderCache(Cache):
 
     def update(self, key_states, value_states, layer_idx, *args, **kwargs):
         # RoPE/norm may promote keys; cache the dtype actually consumed by attention.
-        return super().update(key_states.to(value_states.dtype), value_states, layer_idx, *args, **kwargs)
+        key_states = key_states.to(value_states.dtype)
+        layer = self.layers[layer_idx]
+        if type(layer) is DynamicLayer and not layer.is_initialized:
+            # HF initializes a rank-one empty tensor. Inductor's cat lowering
+            # requires the cache rank even when its sequence dimension is empty.
+            layer.lazy_initialization(key_states, value_states)
+            layer.keys, layer.values = key_states, value_states
+            return key_states, value_states
+        return super().update(key_states, value_states, layer_idx, *args, **kwargs)
 
     def get_seq_length(self, layer_idx: int = 0) -> int:
         return self.seen_tokens

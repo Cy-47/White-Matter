@@ -8,6 +8,7 @@ from typing import Literal, overload
 import torch
 from torch import nn
 
+from white_matter._typing import nested_compile_region
 from white_matter.modules.documents import document_position_ids
 from white_matter.modules.kv_pool import KVPool
 from white_matter.modules.precision import model_autocast_context
@@ -62,6 +63,8 @@ class LCKVBlock(nn.Module):
         past_key_values: tuple[torch.Tensor, torch.Tensor] | None = None,
         metadata: StrictCausalMetadata | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Keep training passes in the outer graph: PyTorch 2.12 Inductor's
+        # nested-region backward changes this model's BF16 gradients.
         if past_key_values is not None:
             raise ValueError("cached Jacobi continuation requires WhiteMatterBlock")
         keys, values = self.kv_pool.project_sequence(layer_hidden_states.transpose(1, 2).contiguous(), k_pos_emb)
@@ -69,6 +72,25 @@ class LCKVBlock(nn.Module):
             self.layers, x_in, (keys[:, 0],), (values[:, 0],), q_pos_emb, metadata=metadata
         )
         return torch.stack(states, dim=1), hidden
+
+    @nested_compile_region
+    def inference_pass(
+        self,
+        x: torch.Tensor,
+        source: torch.Tensor,
+        q_pos_emb: tuple[torch.Tensor, torch.Tensor],
+        k_pos_emb: tuple[torch.Tensor, torch.Tensor],
+        metadata: StrictCausalMetadata | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """One full refinement using only the fixed source layer's input."""
+        expanded = source.unsqueeze(2).expand(-1, -1, len(self.layers), -1)
+        keys, values = self.kv_pool.project_sequence(expanded, k_pos_emb)
+        hidden = x
+        for layer in self.layers:
+            source = hidden
+            hidden = layer(hidden, keys[:, 0], values[:, 0], q_pos_emb, metadata=metadata)
+        # A one-layer block's source aliases x; nested regions require fresh outputs.
+        return source.clone(), hidden
 
     @overload
     def forward(
@@ -114,18 +136,10 @@ class LCKVBlock(nn.Module):
         passes, _ = resolve_passes(self.num_passes, num_passes, num_gradient_passes)
         q_pos_emb, k_pos_emb = self._prepare_rope(x, document_ids)
         metadata = None if document_ids is None else prepare_strict_causal_metadata(document_ids, x.shape[1])
-        source = x
+        source = x.clone()
         with torch.no_grad(), model_autocast_context(x.device):
             for _ in range(passes):
-                # Only the input to the last feedback layer feeds the fixed source.
-                expanded = source.unsqueeze(2).expand(-1, -1, len(self.layers), -1)
-                keys, values = self.kv_pool.project_sequence(expanded, k_pos_emb)
-                del expanded
-                hidden = x
-                for layer in self.layers:
-                    source = hidden
-                    hidden = layer(hidden, keys[:, 0], values[:, 0], q_pos_emb, metadata=metadata)
-                del keys, values
+                source, hidden = self.inference_pass(x, source, q_pos_emb, k_pos_emb, metadata)
             if output_final_state:
                 expanded = source.unsqueeze(2).expand(-1, -1, len(self.layers), -1)
                 return hidden, self.kv_pool.project_sequence(expanded, k_pos_emb)

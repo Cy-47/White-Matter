@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import time
+import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -42,6 +43,13 @@ def resolve_tokenizer_backend(backend: str) -> str:
     except ModuleNotFoundError as exc:
         if exc.name != "gigatoken":
             raise
+        warnings.warn(
+            "Gigatoken is not installed; falling back to slower Hugging Face tokenization. "
+            "Install with: pip install 'gigatoken>=0.10,<1'. "
+            "Select --tokenizer-backend hf to use Hugging Face explicitly.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return "hf"
     return "gigatoken"
 
@@ -56,7 +64,7 @@ def load_tokenizer(backend: str):
         try:
             import gigatoken
         except ImportError as exc:
-            raise ImportError("Gigatoken backend requires: pip install -e '.[training,data,gigatoken]'") from exc
+            raise ImportError("Gigatoken backend requires: pip install 'gigatoken>=0.10,<1'") from exc
         tokenizer = gigatoken.Tokenizer(tokenizer).as_hf()
     return tokenizer
 

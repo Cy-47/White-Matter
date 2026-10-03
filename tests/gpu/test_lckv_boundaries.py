@@ -37,9 +37,9 @@ def test_all_singleton_documents(length, compiled):
         if hasattr(module, "attention_implementation"):
             module.attention_implementation = "sdpa"
     if compiled:
-        from training.compile import compile_feedback
+        from training.compile import configure_training_compilation
 
-        compile_feedback(model, mode="default")
+        configure_training_compilation(model)
         model.compile(options={"emulate_precision_casts": True})
     inputs = torch.randn(2, length, 64, device="cuda")
     documents = torch.arange(length, device="cuda")[None].expand(2, -1)

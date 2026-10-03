@@ -3,7 +3,7 @@
 import torch
 import torch.distributed as dist
 
-from training.compile import compile_feedback, compile_training_forward
+from training.compile import compile_training_forward, configure_training_compilation
 from training.distributed import all_reduce_grads
 from training.forward import TrainingForward
 from training.losses import cce_linear_cross_entropy, checkpointed_linear_cross_entropy
@@ -16,7 +16,7 @@ def prepare_training_forward(model, recipe, batch_size, *, compiled=True):
     device = model.get_input_embeddings().weight.device
     chunk_size = 16 if recipe.model.execution_mode == "autoregressive" and not recipe.ar_cuda_graph else 0
     if compiled:
-        compile_feedback(model, mode="default", ar_dynamic=recipe.model.execution_mode == "autoregressive")
+        configure_training_compilation(model, ar_dynamic=recipe.model.execution_mode == "autoregressive")
     runner = TrainingForward(
         model, checkpoint_chunk_size=chunk_size, external_ce=recipe.loss_backend == "cce" or chunk_size > 0
     ).to(device)
@@ -60,12 +60,10 @@ def training_gradients(model, training_forward, optimizers, batches, recipe, *, 
         model.zero_grad(set_to_none=True)
         input_ids = next(batches)
         with attention_kernel_context(device), model_autocast_context(device):
-            embeddings = model.model.embed_tokens(input_ids)
-            decoder_inputs = cast_residual(
-                embeddings,
-                residual_dtype=residual_dtype,
-            )
+            decoder_inputs = None
             if check_gradients and microbatch == 0:
+                embeddings = model.model.embed_tokens(input_ids)
+                decoder_inputs = cast_residual(embeddings, residual_dtype=residual_dtype)
                 if embeddings.dtype != torch.float32:
                     raise RuntimeError(f"trainable fp32 embedding produced a non-fp32 activation: {embeddings.dtype}")
                 assert_precision_contract(
@@ -73,6 +71,7 @@ def training_gradients(model, training_forward, optimizers, batches, recipe, *, 
                     decoder_inputs,
                     residual_dtype=residual_dtype,
                 )
+                del embeddings
             # Norm + head + CE run in the compiled decoder runner unless
             # an external logit-free/bounded loss was selected.
             value = training_forward(
@@ -90,7 +89,7 @@ def training_gradients(model, training_forward, optimizers, batches, recipe, *, 
             else:
                 loss = value
             del value
-            del decoder_inputs, embeddings
+            del decoder_inputs
 
         # Clip this microbatch before accumulation and data-parallel averaging.
         loss.backward()

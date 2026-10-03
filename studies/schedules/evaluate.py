@@ -18,8 +18,10 @@ from studies.protocol import (
     validate_paper_cache,
 )
 from studies.schedules.matrix import arm_values, evaluation_horizon, recipe_path, validate_recipe
+from training.compile import compile_evaluation
 from training.precision import configure_precision
 from training.recipes import load_recipe
+from white_matter.compilation import add_compile_argument, execution_policy
 from white_matter.models import register_models
 
 
@@ -48,8 +50,13 @@ def main() -> None:
     parser.add_argument("--first-pass", type=int, default=1)
     parser.add_argument("--last-pass", type=int, help="default: paper ceiling for this arm and mode (32, 96, or 128)")
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True)
+    add_compile_argument(parser)
     args = parser.parse_args()
+    with execution_policy(args.compile):
+        _run(args, parser)
+
+
+def _run(args, parser):
     if args.first_pass < 1 or (args.last_pass is not None and args.last_pass < args.first_pass):
         parser.error("pass range must be positive and increasing")
     if args.mode != "tp" and (args.last_pass or args.first_pass) > 32:
@@ -71,10 +78,8 @@ def main() -> None:
         args.last_pass = evaluation_horizon(arm, args.mode)
     if args.first_pass > args.last_pass:
         parser.error("--first-pass exceeds the default observation ceiling; specify --last-pass")
-    if args.compile and device.type == "cuda":
-        from training.compile import compile_feedback
-
-        compile_feedback(model, mode="default")
+    if args.compile:
+        compile_evaluation(model, eager_pass_loop=True)
     loader = paper_test_loader(args.data_dir, batch_size=args.batch_size, device=device)
     original_mode, original_groups = model.config.execution_mode, model.config.cyclic_groups
     if args.mode == "cyclic16":
@@ -92,6 +97,7 @@ def main() -> None:
     finally:
         model.config.execution_mode, model.config.cyclic_groups = original_mode, original_groups
     result = {
+        "compiled": args.compile,
         "protocol": "figure7a_sequential_final",
         "seed": seed,
         "arm": arm,

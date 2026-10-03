@@ -17,63 +17,74 @@ from benchmarks._measurement import (
     write_json,
 )
 from evals.loading import load_complete_model
-from studies.prefill_convergence.contiguous import forward_contiguous
+from studies.prefill_convergence.contiguous import _forward as contiguous_forward
 from studies.prefill_convergence.evaluate import load_windows
 from studies.prefill_convergence.protocol import MODES, schedules, validate_checkpoint
-from training.compile import compile_feedback
+from white_matter.compilation import execution_policy
 from white_matter.models import register_models
 from white_matter.modules.precision import model_autocast_context
+from white_matter.ops.strict_causal_attention import _standalone_flash_available
 
 
+@torch.compiler.disable
 def _observe_full_pass(_passes, _hidden):
-    """Request every pass's output so all schedules execute full layer sweeps."""
+    """Keep full pass outputs live without retaining all passes in GPU memory."""
+
+
+def _compile_trial(model, x, positions):
+    block = model.model.decoder.block
+
+    def trial(mode, passes):
+        if mode == "ar":
+            cache = model.allocate_inference_cache(x.shape[1])
+            return model.model.decoder(x, past_key_values=cache, position_ids=positions)
+        if mode == "jacobi":
+            return block.forward_jacobi(x, num_passes=passes, num_gradient_passes=0)
+        if mode.startswith("contiguous"):
+            return contiguous_forward(
+                block,
+                x,
+                num_passes=passes,
+                chunks=MODES[mode],
+                backend="auto",
+                on_pass=_observe_full_pass,
+                output_final_state=False,
+            )
+        return block(x, num_passes=passes, cyclic_groups=MODES[mode], num_gradient_passes=0, on_pass=_observe_full_pass)
+
+    return torch.compile(
+        trial,
+        dynamic=False,
+        # Each schedule specializes the shared trial code, including the AR baseline.
+        recompile_limit=max(len(MODES) + 1, torch._dynamo.config.recompile_limit),
+        options={"emulate_precision_casts": True, "reorder_for_locality": False},
+    )
 
 
 @torch.inference_mode()
+@execution_policy()
 def measure(model, ids, selections, *, warmups=5, repetitions=30, ar_repetitions=10, include_ar=True):
     if not ids.is_cuda:
         raise ValueError("convergence timing requires CUDA")
     model.config.document_separator_token_id = None
     model.config.prefill_mode = "autoregressive"
-    block = model.model.decoder.block
-    compile_feedback(model, mode="default")
-    block._run_token_layers = torch.compile(block._run_token_layers, dynamic=True, fullgraph=False)
     rows = {}
     with model_autocast_context(ids.device):
         x = model.model.embed_tokens(ids)
         positions = torch.arange(ids.shape[1], device=ids.device)[None].expand_as(ids)
+        trial = _compile_trial(model, x, positions)
         cases = {"ar": None, **selections} if include_ar else selections
         for mode, passes in cases.items():
             if passes is None and mode != "ar":
                 continue
 
-            def trial(mode=mode, passes=passes):
-                if mode == "ar":
-                    cache = model.allocate_inference_cache(ids.shape[1])
-                    return model.model.decoder(x, past_key_values=cache, position_ids=positions)
-                if mode == "jacobi":
-                    return block.forward_jacobi(x, num_passes=passes, num_gradient_passes=0)
-                if mode.startswith("contiguous"):
-                    return forward_contiguous(
-                        block,
-                        x,
-                        num_passes=passes,
-                        chunks=MODES[mode],
-                        backend="flash_attention_2",
-                        compiled=True,
-                        on_pass=_observe_full_pass,
-                    )
-                return block(
-                    x, num_passes=passes, cyclic_groups=MODES[mode], num_gradient_passes=0, on_pass=_observe_full_pass
-                )
-
             for _ in range(warmups):
-                trial()
+                trial(mode, passes)
             torch.cuda.synchronize()
             samples = []
             for _ in range(ar_repetitions if mode == "ar" else repetitions):
                 start = perf_counter()
-                trial()
+                trial(mode, passes)
                 torch.cuda.synchronize()
                 samples.append(perf_counter() - start)
             stats = summarize(samples)
@@ -113,8 +124,8 @@ def main():
     validate_checkpoint(model.config)
     for module in model.modules():
         if hasattr(module, "attention_implementation"):
-            module.attention_implementation = "flash_attention_2"
-    model.config._attn_implementation = "flash_attention_2"
+            module.attention_implementation = "sdpa"
+    model.config._attn_implementation = "sdpa"
     ids = torch.from_numpy(windows[: args.batch_size].astype(np.int64)).cuda()
     source = snapshot_source(args.output.parent / "sources")
     rows = measure(model, ids, selected, include_ar="ar" in modes)
@@ -134,7 +145,7 @@ def main():
             "precision": "bf16",
             "compiled": True,
             "scope": "full layer sweep every pass; decoder excluding embeddings, final norm, LM head and token selection",
-            "contiguous_backend": "flash_attention_2",
+            "contiguous_backend": "flash_attention_2" if _standalone_flash_available() else "torch_flash",
             "warmups": 5,
             "repetitions": 30,
             "ar_repetitions": 10,

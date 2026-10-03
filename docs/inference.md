@@ -1,6 +1,12 @@
 # Inference and benchmarking
 
-WhiteMatter, Vanilla, LCKV, and Feedback Transformer support Hugging Face `forward` and `generate` with dynamic or static caches. FusedKV supports `generate(use_cache=False)`, recomputing the full prefix at each step. The evaluation harness selects this automatically and uses the same Hugging Face generation controls for every family. For CUDA inference, install the `gpu` extra and load the model with BF16 weights and FlashAttention:
+WhiteMatter, Vanilla, LCKV, and Feedback Transformer support Hugging Face `forward` and `generate` with dynamic or static caches. FusedKV supports `generate(use_cache=False)`, recomputing the full prefix at each step. The evaluation harness selects this automatically and uses the same Hugging Face generation controls for every family. For CUDA inference, install the model and GPU dependencies, then load the model with BF16 weights and PyTorch SDPA:
+
+```bash
+pip install -e '.[tilelang]'
+```
+
+See the [installation guide](installation.md) for CUDA environment requirements.
 
 ```python
 import torch
@@ -11,7 +17,7 @@ register_models()
 model = AutoModelForCausalLM.from_pretrained(
     "/path/to/checkpoint",
     dtype=torch.bfloat16,
-    attn_implementation="flash_attention_2",
+    attn_implementation="sdpa",
 ).cuda().eval()
 model.config.document_separator_token_id = None
 model.config.prefill_mode = "cyclic"  # WhiteMatter only
@@ -22,7 +28,9 @@ with torch.no_grad():
 
 WhiteMatter's `prefill_mode="cyclic"` uses cyclic passes for the prompt, while `"jacobi"` uses token-parallel Jacobi passes and `"autoregressive"` processes it sequentially. All three modes continue autoregressively during cached decoding. Set the mode explicitly when a WhiteMatter checkpoint does not specify one. LCKV uses Jacobi prefill by default and also accepts `"autoregressive"` prefill.
 
-Jacobi sweeps use FlashAttention on CUDA when it is installed, including packed documents; otherwise they use the PyTorch reference. This selection is independent of the ordinary decoder attention setting.
+Strict-causal readers share the [backend policy](installation.md#backend-selection).
+See [compilation policy](installation.md#compilation-policy) for model compilation
+and autoregressive loop behavior.
 
 Dynamic caches support padding, document boundaries, and beam reordering. Static caches are for unpadded, single-document inference and require a capacity. A supplied cache persists across calls until reset; a generation call does not reset it. `document_separator_token_id=None` treats the prompt as one document even if it contains EOS. Explicit document IDs can instead define packed-document boundaries.
 
@@ -31,6 +39,9 @@ prefill. Its benchmark recipe measures an architecture control with random weigh
 Its uncached forward supports differentiation, but the shared training CLI's
 autoregressive checkpointing is not implemented for this family.
 
+The `DecodeGraph` helper accepts SDPA and external FlashAttention. Capture
+requires a prefilled CUDA static cache and single-document inference.
+
 For fixed-batch CUDA decoding with bounded prefill memory, see [examples/generation.py](../examples/generation.py). It shows `allocate_inference_cache`, `prefill`, and `DecodeGraph`. The example uses greedy decoding; `model.generate` provides Hugging Face sampling and stopping policies. Multi-turn cyclic suffix prefill, cache rollback, and paging are not supported.
 
 ## Measure throughput and memory
@@ -38,7 +49,7 @@ For fixed-batch CUDA decoding with bounded prefill memory, see [examples/generat
 Install the benchmark dependencies and run the generation benchmark on local Hugging Face exports:
 
 ```bash
-pip install -e '.[benchmarks]'
+pip install -e '.[research]'
 python -m benchmarks.generation --models /path/to/wm /path/to/vanilla \
   --prompt-lengths 2048 --batch-sizes 1 2 4 8 16 32 64 \
   --tokens 129 --memory-budget-gib 40 --output outputs/benchmarks

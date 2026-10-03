@@ -2,6 +2,7 @@
 
 import json
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -64,6 +65,9 @@ def test_matched_memory_search_records_oom_and_checks_boundary(tmp_path, monkeyp
         case = json.loads(path.read_text())
         payload = case["workload"]
         batch, model = payload["batch_size"], payload["model"]
+        assert payload["compiled"] is True
+        assert payload["attention_backend"] == "sdpa"
+        assert payload["cuda_graph"] is True
         assert payload["phase"] == phase
         assert payload["num_splits"] == 2
         assert payload["prefill_batch_size"] == 1
@@ -232,3 +236,90 @@ def test_oom_cannot_establish_capacity_when_source_changes(tmp_path, monkeypatch
     assert calls == 2
     assert case["status"] == "failed"
     assert "source changed" in case["error"]
+
+
+@pytest.mark.parametrize(("flags", "enabled"), [([], True), (["--cuda-graph"], True), (["--no-cuda-graph"], False)])
+def test_sdpa_graph_capture_default_and_override(monkeypatch, flags, enabled):
+    monkeypatch.setattr(sys, "argv", ["generation", "--models", "unused", *flags])
+    calls = []
+    monkeypatch.setattr(generation, "run_sweep", lambda args, **kwargs: calls.append(args))
+    generation.main()
+    assert len(calls) == 1
+    assert calls[0].attention_backend == "sdpa"
+    assert calls[0].cuda_graph is enabled
+
+
+def test_eager_worker_disables_internal_compilation(tmp_path, monkeypatch):
+    path = tmp_path / "cases" / "case.json"
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps(
+            {"case_id": "case", "status": "pending", "workload": {"model": "model", "compiled": False, "profile": None}}
+        )
+    )
+    (tmp_path / "run.json").write_text(json.dumps({"source": {}, "checkpoints": {"model": {}}}))
+    monkeypatch.setattr(_runner, "verify_sources", lambda _: None)
+    monkeypatch.setattr(_runner, "input_files", lambda _: {})
+
+    @torch.compile(backend=lambda *_: pytest.fail("eager worker invoked the compiler"))
+    def internal(x):
+        return x + 1
+
+    _runner.run_worker(path, lambda _: {"value": internal(torch.tensor(1)).item()})
+    assert json.loads(path.read_text())["result"]["value"] == 2
+
+
+def test_eager_generation_profile_preserves_worker_stance(tmp_path, monkeypatch):
+    @torch.compile(backend=lambda *_: pytest.fail("eager profiling invoked the compiler"))
+    def internal(x):
+        return x + 1
+
+    cache = SimpleNamespace(reset=lambda: None, get_seq_length=lambda: 4)
+    config = SimpleNamespace(model_type="vanilla", vocab_size=8, to_dict=dict)
+    model = SimpleNamespace(
+        config=config,
+        cuda=lambda: model,
+        eval=lambda: model,
+        modules=list,
+        allocate_inference_cache=lambda _: cache,
+    )
+    monkeypatch.setattr(generation.AutoModelForCausalLM, "from_pretrained", lambda *a, **kw: model)
+    monkeypatch.setattr(generation, "prefill_forward", lambda model, prompt, cache, **kw: internal(prompt[..., None]))
+    monkeypatch.setattr(generation, "environment", lambda _: {})
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    for name in ("synchronize", "empty_cache", "reset_peak_memory_stats"):
+        monkeypatch.setattr(torch.cuda, name, lambda: None)
+    for name in ("max_memory_allocated", "max_memory_reserved"):
+        monkeypatch.setattr(torch.cuda, name, lambda: 0)
+    for name in ("randint", "empty"):
+        factory = getattr(torch, name)
+
+        def on_cpu(*args, _factory=factory, **kwargs):
+            kwargs["device"] = "cpu"
+            return _factory(*args, **kwargs)
+
+        monkeypatch.setattr(torch, name, on_cpu)
+    exported = []
+    monkeypatch.setattr(
+        torch.profiler, "profile", lambda **kw: nullcontext(SimpleNamespace(export_chrome_trace=exported.append))
+    )
+    args = SimpleNamespace(
+        model=str(tmp_path / "model"),
+        seed=1,
+        parameter_dtype="bfloat16",
+        attention_backend="sdpa",
+        num_splits=0,
+        phase="prefill",
+        batch_size=1,
+        prompt_length=4,
+        tokens=1,
+        prefill_batch_size=1,
+        compiled=False,
+        cuda_graph=False,
+        warmups=1,
+        profile=str(tmp_path / "trace.json"),
+    )
+    with torch.compiler.set_stance("force_eager"):
+        result = generation.benchmark(args)
+    assert result["trace"] == args.profile
+    assert exported == [args.profile]

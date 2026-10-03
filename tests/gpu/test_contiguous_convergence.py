@@ -26,7 +26,7 @@ def test_compiled_flash_matches_reference(length, chunks, batch):
     model = AutoModelForCausalLM.from_config(config).cuda().eval()
     block = model.model.decoder.block
     x = torch.randn(batch, length, config.hidden_size, device="cuda")
-    expected = forward_contiguous(block, x, num_passes=3, chunks=chunks, output_final_state=True)
+    expected = forward_contiguous(block, x, num_passes=3, chunks=chunks, compiled=False, output_final_state=True)
     for _ in range(2):
         actual = forward_contiguous(
             block, x, num_passes=3, chunks=chunks, backend="flash_attention_2", compiled=True, output_final_state=True
@@ -62,7 +62,7 @@ def test_cyclic64_attention_matches_reference(offset):
 
 @torch.inference_mode()
 def test_timing_contiguous_executes_every_layer_each_pass(monkeypatch):
-    from studies.prefill_convergence import benchmark, contiguous
+    from studies.prefill_convergence import benchmark
     from tests.unit.test_experiment_protocols import tiny_model
 
     model = tiny_model("cuda")
@@ -70,9 +70,7 @@ def test_timing_contiguous_executes_every_layer_each_pass(monkeypatch):
     for layer in block.layers:
         layer.self_attn.attention_implementation = "flash_attention_2"
     # Keep layer hooks visible while exercising the actual benchmark dispatch.
-    monkeypatch.setattr(benchmark, "compile_feedback", lambda *args, **kwargs: None)
     monkeypatch.setattr(torch, "compile", lambda fn, **kwargs: fn)
-    monkeypatch.setattr(contiguous, "_compiled_chunk", contiguous._chunk)
     calls = [0] * len(block.layers)
 
     def count(index):
@@ -95,3 +93,36 @@ def test_timing_contiguous_executes_every_layer_each_pass(monkeypatch):
         for handle in handles:
             handle.remove()
     assert calls == [6] * len(block.layers)
+
+
+@pytest.mark.parametrize("chunks", [1, 8])
+@pytest.mark.parametrize("use_dummy_token", [False, True])
+@torch.inference_mode()
+def test_contiguous_honors_external_flash_backend(monkeypatch, chunks, use_dummy_token):
+    import importlib
+
+    from tests.unit.test_experiment_protocols import tiny_model
+
+    torch.compiler.reset()
+    config = tiny_model().config
+    config.use_dummy_token = use_dummy_token
+    model = AutoModelForCausalLM.from_config(config).cuda().eval()
+    block = model.model.decoder.block
+    for layer in block.layers:
+        layer.self_attn.attention_implementation = "flash_attention_2"
+    x = torch.randn(2, 8, config.hidden_size, device="cuda")
+    expected = forward_contiguous(block, x, num_passes=2, chunks=chunks, compiled=False)
+
+    def reject_native_flash(*args, **kwargs):
+        raise AssertionError("Explicit external FlashAttention must bypass native kernel selection")
+
+    strict = importlib.import_module("white_matter.ops.strict_causal_attention")
+    monkeypatch.setattr(strict, "can_use_torch_flash", reject_native_flash)
+    try:
+        for compiled in (False, True):
+            actual = forward_contiguous(
+                block, x, num_passes=2, chunks=chunks, backend="flash_attention_2", compiled=compiled
+            )
+            torch.testing.assert_close(actual, expected, rtol=0.04, atol=0.06)
+    finally:
+        torch.compiler.reset()

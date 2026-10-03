@@ -8,7 +8,7 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from training.compile import compile_feedback
+from training.compile import configure_training_compilation
 from training.forward import TrainingForward
 from training.losses import cce_linear_cross_entropy
 from training.optim import (
@@ -126,7 +126,7 @@ def test_shared_step_matches_reference(device, accumulation, loss_backend, monke
             runner = prepare_training_forward(model, recipe, 1, compiled=compiled)
         else:
             if compiled:
-                compile_feedback(model, mode="default")
+                configure_training_compilation(model)
             runner = TrainingForward(model, external_ce=loss_backend == "cce")
             if compiled:
                 runner = torch.compile(

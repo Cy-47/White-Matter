@@ -201,7 +201,7 @@ def test_gpu_generation_dynamic_padding_matches_sdpa(prefill, documents, monkeyp
         for layer in lm.model.model.decoder.block.layers:
             monkeypatch.setattr(layer.self_attn, "attention_implementation", "sdpa")
             if prefill == "jacobi":
-                monkeypatch.setattr(layer.self_attn, "_force_jacobi_reference", True, raising=False)
+                monkeypatch.setattr(layer.self_attn, "_force_strict_reference", True, raising=False)
         assert lm.generate_until(requests) == ["ZZ", "ZZ"]
     finally:
         handle.remove()

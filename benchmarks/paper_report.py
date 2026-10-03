@@ -36,6 +36,7 @@ def collect(directories):
                 or work["tokens"] != 129
                 or not work["compiled"]
                 or not work["cuda_graph"]
+                or work.get("attention_backend", "flash_attention_2") != "flash_attention_2"
                 or work["prefill_batch_size"] != 0
                 or work["repetitions"] != 5
                 or work.get("parameter_dtype") != PARAMETER_DTYPE

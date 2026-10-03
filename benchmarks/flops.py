@@ -4,11 +4,13 @@ import argparse
 from pathlib import Path
 
 import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from transformers import AutoModelForCausalLM
 
 from benchmarks._flop_counter import make_counter, single_pass_formula
 from benchmarks._measurement import digest, environment, snapshot_source, verify_sources, write_json
 from training.recipes import load_recipe
+from white_matter.compilation import execution_policy
 from white_matter.models import register_models
 from white_matter.models.cache import DecoderCache
 from white_matter.modules.precision import model_autocast_context
@@ -62,11 +64,11 @@ def seed_cache(decoder, config, context, device):
     return cache
 
 
-def measure(recipe, *, length=2048, context=2048):
+def measure(recipe, *, length=2048, context=2048, attention_backend="sdpa"):
     if not torch.cuda.is_available():
         raise RuntimeError("FLOP measurement requires CUDA and the production attention backends")
     config = recipe.model
-    config._attn_implementation = "flash_attention_2"
+    config._attn_implementation = attention_backend
     config.document_separator_token_id = None
     if config.model_type in {"white_matter", "lckv"}:
         config.prefill_mode = config.execution_mode
@@ -75,7 +77,7 @@ def measure(recipe, *, length=2048, context=2048):
     decoder = model.model.decoder
     result = {}
     # Count dispatcher-visible algorithmic work, not compiler fusion or replay.
-    with torch.compiler.set_stance("force_eager"):
+    with execution_policy(False, reason="FLOP accounting requires unfused dispatcher operations"):
         for regime in ("train", "prefill", "decode"):
             decoder.train(regime == "train")
             model.zero_grad(set_to_none=True)
@@ -87,8 +89,13 @@ def measure(recipe, *, length=2048, context=2048):
                 requires_grad=regime == "train",
             )
             cache = seed_cache(decoder, config, context, x.device) if regime == "decode" else None
-            counter = make_counter()
-            with counter, model_autocast_context("cuda"), torch.set_grad_enabled(regime == "train"):
+            counter = make_counter(attention_backend)
+            with (
+                counter,
+                sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]),
+                model_autocast_context("cuda"),
+                torch.set_grad_enabled(regime == "train"),
+            ):
                 if regime == "train":
                     out = decoder(
                         x, num_passes=getattr(config, "num_passes", 1), num_gradient_passes=recipe.gradient_passes or 1
@@ -128,6 +135,7 @@ def main():
     parser.add_argument(
         "--recipes", type=Path, nargs="+", default=[Path("recipes/paper") / f"{a}.yaml" for a in PAPER_ARMS]
     )
+    parser.add_argument("--attention-backend", choices=["sdpa", "flash_attention_2"], default="sdpa")
     parser.add_argument("--sequence-length", type=int, default=2048)
     parser.add_argument("--context", type=int, default=2048)
     parser.add_argument("--output", type=Path, required=True)
@@ -149,6 +157,7 @@ def main():
                 recipe,
                 length=args.sequence_length,
                 context=args.context,
+                attention_backend=args.attention_backend,
             ),
         }
     baseline = rows.get("vanilla_16l")
@@ -164,6 +173,7 @@ def main():
         {
             "source": source,
             "protocol": "paper_flops",
+            "attention_backend": args.attention_backend,
             "sequence_length": args.sequence_length,
             "context": args.context,
             "conventions": {

@@ -9,7 +9,7 @@ from transformers import AutoModelForCausalLM
 from studies.rank.depth_causal import DepthCausalConfig
 from studies.rank.depth_causal import register_model as register_depth_causal
 from tests.numerics import assert_close, assert_gradient_maps_close
-from training.compile import compile_feedback, compile_training_forward
+from training.compile import compile_training_forward, configure_training_compilation
 from training.forward import TrainingForward
 from training.precision import attention_kernel_context, configure_precision
 from white_matter.models import register_models
@@ -94,7 +94,7 @@ def test_static_k16_matches_zero_weight_dynamic_reference_with_packed_documents(
     dynamic.load_state_dict(copy.deepcopy(static.state_dict()))
     for layer in dynamic.model.decoder.block.layers:
         layer.self_attn._force_cyclic_reference = True
-    compile_feedback(static, mode="default")
+    configure_training_compilation(static)
     ids = _ids()
     expected = _run(dynamic, ids, compiled=False, passes=3, gradient_passes=2)
     actual = _run(static, ids, compiled=True, passes=3, gradient_passes=2)
@@ -111,8 +111,8 @@ def test_jacobi_checkpoint_matches_uncheckpointed_full_training_gradients():
     reference = AutoModelForCausalLM.from_config(_configuration(**common)).cuda().train()
     reference.load_state_dict(copy.deepcopy(optimized.state_dict()))
     for layer in reference.model.decoder.block.layers:
-        layer.self_attn._force_jacobi_reference = True
-    compile_feedback(optimized, mode="default")
+        layer.self_attn._force_strict_reference = True
+    configure_training_compilation(optimized)
     ids = _ids(length=128)
     expected = _run(reference, ids, compiled=False, passes=3, gradient_passes=2)
     from unittest.mock import patch

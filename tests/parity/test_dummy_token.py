@@ -5,7 +5,7 @@ import copy
 import pytest
 import torch
 
-from training.compile import compile_feedback
+from training.compile import configure_training_compilation
 from training.forward import TrainingForward
 from training.precision import configure_precision
 from white_matter import WhiteMatterConfig, WhiteMatterForCausalLM
@@ -73,7 +73,7 @@ def test_dummy_projection_preserves_training(channels, gradient_passes, device, 
 
     def run(current):
         if compiled:
-            compile_feedback(current, mode="default")
+            configure_training_compilation(current)
         forward = TrainingForward(current)
         if compiled:
             forward = torch.compile(forward, fullgraph=False)

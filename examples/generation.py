@@ -10,6 +10,7 @@ import argparse
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from white_matter.compilation import add_compile_argument, execution_policy
 from white_matter.models import register_models
 from white_matter.models.generation import DecodeGraph, prefill
 
@@ -21,9 +22,15 @@ def main():
     parser.add_argument("--tokenizer", help="Defaults to the checkpoint directory")
     parser.add_argument("--prompt", default="Hello")
     parser.add_argument("--tokens", type=int, default=32)
+    add_compile_argument(parser)
     args = parser.parse_args()
     if args.tokens < 1:
         parser.error("--tokens must be positive")
+    with execution_policy(args.compile):
+        run(args)
+
+
+def run(args):
     register_models()
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer or args.checkpoint)
     model = (
@@ -40,12 +47,12 @@ def main():
         model.config.prefill_mode = "cyclic"
     inputs = tokenizer(args.prompt, return_tensors="pt").input_ids.cuda()
     cache = model.allocate_inference_cache(inputs.shape[1] + args.tokens)
+    if args.compile:
+        model.compile(options={"emulate_precision_casts": True, "reorder_for_locality": False})
     logits = prefill(model, inputs, cache)
     tokens = [logits[:, -1].argmax(-1, keepdim=True)]
     del logits
     if args.tokens > 1:
-        # Preserve explicit BF16 rounding and cache read/write order.
-        model.compile(options={"emulate_precision_casts": True, "reorder_for_locality": False})
         graph = DecodeGraph(model, cache)
         for _ in range(1, args.tokens):
             # Graph logits are borrowed; consume them before the next replay.
