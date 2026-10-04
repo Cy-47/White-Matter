@@ -18,10 +18,23 @@ All nine recipes are self-contained in this directory. The baseline recipes matc
 KV channel count, and pass schedule. L+1 changes the source pool and router
 parameter counts; evaluation counts parameters from each checkpoint.
 
-This directory covers main quality training and evaluation. Schedule, rank,
-shared-mixture, and convergence experiments have separate protocols under
-`studies/`. Their existing validators target their original settings. The
-runtime preset also selects the original paper recipes.
+Analysis recipes are grouped in `rank/`, `schedules/`, and `shared_mixture/`.
+They retain the 20,000-step, batch-8 budgets of the original studies. The
+48 schedule recipes cover both seeds; rank has ten arms, and shared-mixture
+has one arm. The depth-causal control uses no dummy and only the available
+source prefix at each layer, so `include_top_output` remains false.
+
+Train an analysis recipe on one GPU:
+
+```bash
+torchrun --standalone --nproc-per-node=1 -m studies.train_new \
+  --recipe recipes/paper_new/rank/k8.yaml \
+  --data-dir data/paper_new --output-dir outputs/paper_new/rank/k8
+```
+
+`studies.train_new` checks the matched recipe and continuous-source cache.
+The original study evaluators still validate the original protocols; their
+migration is separate from these training runs.
 
 ## Data
 

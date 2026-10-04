@@ -131,11 +131,13 @@ def test_jacobi_checkpoint_matches_uncheckpointed_full_training_gradients():
     _compare(actual, expected)
 
 
-def test_depth_causal_compiled_training_matches_eager_on_packed_documents():
+@pytest.mark.parametrize("dummy", [False, True])
+def test_depth_causal_compiled_training_matches_eager_on_packed_documents(dummy):
     register_depth_causal()
     configure_precision("cuda")
     torch.manual_seed(1741)
     config = DepthCausalConfig(
+        use_dummy_token=dummy,
         vocab_size=257,
         hidden_size=192,
         intermediate_size=384,

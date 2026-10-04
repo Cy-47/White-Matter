@@ -1,0 +1,45 @@
+name: schedules_seed1338_ng4_g2_c4
+model:
+  model_type: white_matter
+  vocab_size: 151936
+  hidden_size: 512
+  intermediate_size: 1536
+  num_hidden_layers: 16
+  num_attention_heads: 6
+  num_key_value_heads: 3
+  head_dim: 96
+  max_position_embeddings: 4096
+  rope_theta: 1000000.0
+  rms_norm_eps: 1.0e-06
+  num_kv_channels: 8
+  num_passes: 6
+  prefill_mode: cyclic
+  cyclic_groups: 4
+  router_layer_stride: 2
+  include_top_output: true
+  use_dummy_token: false
+  router_prior: cyclic:0.25
+  eos_token_id: 151643
+  document_separator_token_id: 151643
+  pad_token_id: null
+  execution_mode: cyclic
+data:
+  tokenizer: Qwen/Qwen3-0.6B-Base
+  sequence_length: 2048
+  eos_token_id: 151643
+optimizer:
+  learning_rate: 0.0003
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  muon_momentum: 0.95
+  muon_ns_steps: 5
+  warmup_fraction: 0.02
+  minimum_lr_fraction: 0.1
+  max_gradient_norm: 1.0
+steps: 20000
+global_batch_size: 8
+gradient_accumulation_steps: 1
+seed: 1338
+no_gradient_passes: 4
+gradient_passes: 2

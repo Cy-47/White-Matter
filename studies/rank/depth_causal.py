@@ -17,13 +17,20 @@ from white_matter.models.white_matter.modeling_white_matter import (
 )
 from white_matter.modules.kv_pool import KVPool
 from white_matter.modules.rotary import rotate_half
+from white_matter.ops import prepare_strict_causal_metadata
 
 
 class DepthCausalKVPool(KVPool):
     """Project basis ell as soon as source layers 0 through ell exist."""
 
-    def premix_source(self, hidden: torch.Tensor, dummy: torch.Tensor, layer: int) -> tuple[torch.Tensor, torch.Tensor]:
-        full = torch.cat((dummy.expand(hidden.shape[0], 1, -1).to(hidden.dtype), hidden), dim=1)
+    def premix_source(
+        self, hidden: torch.Tensor, dummy: torch.Tensor | None, layer: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        full = (
+            hidden
+            if dummy is None
+            else torch.cat((dummy.expand(hidden.shape[0], 1, -1).to(hidden.dtype), hidden), dim=1)
+        )
         normed = F.rms_norm(full, (self.hidden_size,), None, self.rms_norm_eps)
         return (
             normed * self.pre_mix_k_weight[layer].to(normed.dtype),
@@ -86,7 +93,11 @@ class DepthCausalBlock(WhiteMatterBlock):
         metadata = None
         if document_ids is not None:
             slots = torch.arange(x.shape[1], device=x.device)
-            metadata = prepare_feedback_metadata(document_ids, [slots], x.shape[1])[0]
+            metadata = (
+                prepare_feedback_metadata(document_ids, [slots], x.shape[1])[0]
+                if self.use_dummy_token
+                else prepare_strict_causal_metadata(document_ids, x.shape[1])
+            )
         sources_k: list[torch.Tensor] = []
         sources_v: list[torch.Tensor] = []
         hidden = x
@@ -97,11 +108,12 @@ class DepthCausalBlock(WhiteMatterBlock):
             key, value = self.kv_pool.project_causal_basis(sources_k, sources_v, layer_idx, k_pos)
             hidden = layer(
                 hidden,
-                key[..., :-1, :].contiguous(),
-                value[..., :-1, :].contiguous(),
+                key[..., :-1, :].contiguous() if self.use_dummy_token else key,
+                value[..., :-1, :].contiguous() if self.use_dummy_token else value,
                 q_pos,
                 document_ids=document_ids,
                 metadata=metadata,
+                jacobi=not self.use_dummy_token,
             )
         return hidden
 
