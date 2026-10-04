@@ -160,3 +160,50 @@ def test_depth_causal_compiled_training_matches_eager_on_packed_documents(dummy)
     expected = _run(reference, ids, compiled=False, passes=1, gradient_passes=1)
     actual = _run(optimized, ids, compiled=True, passes=1, gradient_passes=1)
     _compare(actual, expected)
+
+
+def test_depth_causal_reuses_compiled_graph_across_document_layouts():
+    register_depth_causal()
+    configure_precision("cuda")
+    torch._dynamo.reset()
+    torch.manual_seed(1742)
+    config = DepthCausalConfig(
+        vocab_size=257,
+        hidden_size=192,
+        intermediate_size=384,
+        num_hidden_layers=4,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=96,
+        eos_token_id=256,
+        document_separator_token_id=256,
+        use_dummy_token=False,
+    )
+    config._attn_implementation = "flash_attention_2"
+    model = AutoModelForCausalLM.from_config(config).cuda().train()
+    reference = copy.deepcopy(model)
+    runner = compile_training_forward(TrainingForward(model))
+    # A low limit makes specialization on packed lengths fail quickly.
+    with torch._dynamo.config.patch(recompile_limit=4, fail_on_recompile_limit_hit=True):
+        for spacing in range(3, 15):
+            ids = torch.randint(0, 256, (2, 128), device="cuda")
+            ids[0, spacing - 1 :: spacing] = 256
+            ids[1, spacing :: spacing + 1] = 256
+            model.zero_grad(set_to_none=True)
+            inputs = model.get_input_embeddings()(ids)
+            with attention_kernel_context("cuda"), model_autocast_context("cuda"):
+                loss = runner(inputs, 1, 1, token_ids=ids, compute_ce=True)
+            loss.backward()
+            assert torch.isfinite(loss)
+            if spacing in (3, 14):
+                expected = _run(reference, ids, compiled=False, passes=1, gradient_passes=1)
+                torch.testing.assert_close(loss, expected[1], rtol=2e-3, atol=2e-3)
+                actual_grads = {name: p.grad for name, p in model.named_parameters() if p.requires_grad}
+                assert_gradient_maps_close(
+                    actual_grads,
+                    expected[3],
+                    rtol=1e-1,
+                    atol=2e-3,
+                    aggregate_rtol=3e-2,
+                    cosine=0.999,
+                )
