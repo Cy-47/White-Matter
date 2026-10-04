@@ -162,23 +162,41 @@ def test_depth_causal_compiled_training_matches_eager_on_packed_documents(dummy)
     _compare(actual, expected)
 
 
-def test_depth_causal_reuses_compiled_graph_across_document_layouts():
+@pytest.mark.parametrize("family", ["depth_causal", "jacobi", "vanilla"])
+def test_reuses_compiled_graph_across_document_layouts(family):
     register_depth_causal()
     configure_precision("cuda")
     torch._dynamo.reset()
     torch.manual_seed(1742)
-    config = DepthCausalConfig(
-        vocab_size=257,
-        hidden_size=192,
-        intermediate_size=384,
-        num_hidden_layers=4,
-        num_attention_heads=2,
-        num_key_value_heads=1,
-        head_dim=96,
-        eos_token_id=256,
-        document_separator_token_id=256,
-        use_dummy_token=False,
-    )
+    options = {
+        "vocab_size": 257,
+        "hidden_size": 192,
+        "intermediate_size": 384,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "head_dim": 96,
+        "eos_token_id": 256,
+        "document_separator_token_id": 256,
+    }
+    if family == "vanilla":
+        from white_matter.models.vanilla import VanillaConfig
+
+        config = VanillaConfig(**options)
+        passes, gradient_passes = 1, 1
+    elif family == "jacobi":
+        config = WhiteMatterConfig(
+            **options,
+            num_kv_channels=4,
+            use_dummy_token=False,
+            execution_mode="jacobi",
+            num_passes=3,
+            checkpoint_jacobi_passes=True,
+        )
+        passes, gradient_passes = 3, 2
+    else:
+        config = DepthCausalConfig(**options, use_dummy_token=False)
+        passes, gradient_passes = 1, 1
     config._attn_implementation = "flash_attention_2"
     model = AutoModelForCausalLM.from_config(config).cuda().train()
     reference = copy.deepcopy(model)
@@ -192,11 +210,11 @@ def test_depth_causal_reuses_compiled_graph_across_document_layouts():
             model.zero_grad(set_to_none=True)
             inputs = model.get_input_embeddings()(ids)
             with attention_kernel_context("cuda"), model_autocast_context("cuda"):
-                loss = runner(inputs, 1, 1, token_ids=ids, compute_ce=True)
+                loss = runner(inputs, passes, gradient_passes, token_ids=ids, compute_ce=True)
             loss.backward()
             assert torch.isfinite(loss)
             if spacing in (3, 14):
-                expected = _run(reference, ids, compiled=False, passes=1, gradient_passes=1)
+                expected = _run(reference, ids, compiled=False, passes=passes, gradient_passes=gradient_passes)
                 torch.testing.assert_close(loss, expected[1], rtol=2e-3, atol=2e-3)
                 actual_grads = {name: p.grad for name, p in model.named_parameters() if p.requires_grad}
                 assert_gradient_maps_close(

@@ -140,15 +140,19 @@ def prepare_strict_causal_metadata(
     key_slots = real_slots[(row_offsets[rows[groups]] + ranks).clamp_min(0)]
     key_slots = torch.where(local == 0, -1, key_slots) if use_dummy_token else key_slots
     key_indices = rows[groups] * (extent + offset) + key_slots + offset
-    return StrictCausalMetadata(
+    metadata = StrictCausalMetadata(
         query_indices,
         key_indices,
         cu_queries.int(),
         cu_keys.int(),
-        int(cu_queries.diff().max()),
-        int(lengths.max()),
+        query_length,
+        extent + offset,
         extent + offset,
     )
+    # Document counts vary per batch; keep token and model dimensions static.
+    for tensor in (metadata.query_indices, metadata.key_indices, metadata.cu_queries, metadata.cu_keys):
+        torch._dynamo.mark_dynamic(tensor, 0)
+    return metadata
 
 
 def strict_causal_attention(

@@ -2,6 +2,8 @@
 
 import torch
 
+from white_matter._typing import compiler_disable
+
 
 def document_ids_from_eos(input_ids: torch.Tensor, eos_id: int) -> torch.Tensor:
     """Count preceding EOS tokens; each EOS belongs to the document it closes."""
@@ -25,10 +27,13 @@ def document_position_ids(document_ids: torch.Tensor) -> torch.Tensor:
     return positions - starts
 
 
+@compiler_disable
 def document_cu_seqlens(document_ids: torch.Tensor) -> torch.Tensor:
     """FlashAttention boundaries for flattened (B*T) tokens, including row starts."""
     starts = document_start_mask(document_ids).flatten().nonzero().flatten()
-    return torch.cat((starts, starts.new_full((1,), document_ids.numel()))).to(torch.int32)
+    boundaries = torch.cat((starts, starts.new_full((1,), document_ids.numel()))).to(torch.int32)
+    torch._dynamo.mark_dynamic(boundaries, 0)
+    return boundaries
 
 
 def plain_causal_additive_mask(

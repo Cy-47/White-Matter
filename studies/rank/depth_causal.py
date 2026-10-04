@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import torch
 import torch.nn.functional as F
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 
-from white_matter._typing import compiler_disable
 from white_matter.blocks import WhiteMatterBlock
 from white_matter.blocks._execution.metadata import prepare_feedback_metadata
 from white_matter.models.decoder_utils import prepare_attention_inputs, prepare_decoder_inputs, run_feedforward_layers
@@ -21,16 +18,6 @@ from white_matter.models.white_matter.modeling_white_matter import (
 from white_matter.modules.kv_pool import KVPool
 from white_matter.modules.rotary import rotate_half
 from white_matter.ops import prepare_strict_causal_metadata
-
-
-@compiler_disable
-def _strict_metadata(document_ids: torch.Tensor, length: int):
-    metadata = prepare_strict_causal_metadata(document_ids, length)
-    # Packed document counts vary between batches while token storage stays fixed.
-    for tensor in (metadata.query_indices, metadata.key_indices, metadata.cu_queries, metadata.cu_keys):
-        torch._dynamo.mark_dynamic(tensor, 0)
-    # FlashAttention accepts upper bounds; exact document maxima specialize graphs.
-    return replace(metadata, max_queries=length, max_keys=length)
 
 
 class DepthCausalKVPool(KVPool):
@@ -109,7 +96,7 @@ class DepthCausalBlock(WhiteMatterBlock):
             metadata = (
                 prepare_feedback_metadata(document_ids, [slots], x.shape[1])[0]
                 if self.use_dummy_token
-                else _strict_metadata(document_ids, x.shape[1])
+                else prepare_strict_causal_metadata(document_ids, x.shape[1])
             )
         sources_k: list[torch.Tensor] = []
         sources_v: list[torch.Tensor] = []
