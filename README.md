@@ -63,6 +63,10 @@ Q/K/V have shape `(batch, heads, sequence, head_dim)`. The portable PyTorch back
 
 ## Reproduce the experiments
 
+The [new paper recipe collection](recipes/paper_new/README.md) repeats the main quality
+suite with no dummy token and L+1 sources. Its recipes live in
+`recipes/paper_new/`; `recipes/paper/` retains the published settings.
+
 Prepare the FineWeb-Edu token cache, then train from a paper configuration:
 
 ```bash

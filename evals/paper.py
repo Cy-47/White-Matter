@@ -34,6 +34,22 @@ PAPER_MODELS = (
     "vanilla_1p3b",
     "white_matter_1p3b",
 )
+RECIPE_DIR = Path(__file__).resolve().parents[1] / "recipes/paper"
+
+
+def validate_checkpoint(config, recipe):
+    """Require the selected architecture and complete training endpoint."""
+    from training.recipes import model_recipe_keys
+
+    for key in sorted(model_recipe_keys(type(recipe.model))):
+        if getattr(config, key, None) != getattr(recipe.model, key, None):
+            raise ValueError(f"{recipe.name}: checkpoint {key} differs from recipe")
+    for key, expected in (
+        ("training_step", recipe.steps),
+        ("training_sequence_length", recipe.data.sequence_length),
+    ):
+        if getattr(config, key, None) != expected:
+            raise ValueError(f"{recipe.name}: checkpoint {key} differs from recipe")
 
 
 def downstream_metrics(payloads):
@@ -80,7 +96,7 @@ def downstream_metrics(payloads):
     return output, identity
 
 
-def collect(root):
+def collect(root, *, recipe_dir=RECIPE_DIR):
     import torch
     from transformers import AutoConfig, AutoModelForCausalLM
 
@@ -108,7 +124,7 @@ def collect(root):
         if harness is not None and identity[2] != harness:
             raise ValueError("models were evaluated with different harness revisions")
         harness = identity[2]
-        recipe = load_recipe(Path(__file__).parents[1] / "recipes/paper" / f"{name}.yaml")
+        recipe = load_recipe(recipe_dir / f"{name}.yaml")
         settings = identity[1]
         if (
             settings.get("num_passes", 1) != getattr(recipe.model, "num_passes", 1)
@@ -116,8 +132,7 @@ def collect(root):
         ):
             raise ValueError(f"{name}: evaluation schedule differs from paper recipe")
         config = AutoConfig.from_pretrained(directory / "final")
-        if getattr(config, "training_step", None) != recipe.steps:
-            raise ValueError(f"{name}: checkpoint is not the final training step")
+        validate_checkpoint(config, recipe)
         with torch.device("meta"):
             model = AutoModelForCausalLM.from_config(config)
         parameters = model.num_parameters()
@@ -162,10 +177,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--recipe-dir", type=Path, default=RECIPE_DIR, help="Recipes for all nine quality models.")
     args = parser.parse_args()
     if args.output.exists():
         raise FileExistsError(args.output)
-    rows = collect(args.results_dir)
+    rows = collect(args.results_dir, recipe_dir=args.recipe_dir)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))

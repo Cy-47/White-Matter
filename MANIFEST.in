@@ -6,7 +6,7 @@ recursive-include benchmarks *.py *.md
 recursive-include training *.py
 recursive-include evals *.py
 recursive-include scripts *.py
-recursive-include recipes *.yaml
+recursive-include recipes *.yaml *.md
 recursive-include slurm *.sbatch *.md
 recursive-include studies *.py *.yaml *.sbatch *.md
 recursive-include tests *.py
